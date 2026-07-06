@@ -11,6 +11,9 @@ $ErrorActionPreference = 'Stop'
 $sourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $sourceRoot 'Deployment\Scripts\Common.ps1')
 
+$script:DiskPartScriptFileName = 'OSIT-DiskPart.txt'
+$script:DiskPartLogFileName = 'OSIT-DiskPart.log'
+
 function Set-DotEnvSecret {
     param(
         [string]$Path,
@@ -130,11 +133,11 @@ function ConvertTo-XmlText {
     return [System.Security.SecurityElement]::Escape($Value)
 }
 
-function New-WindowsPeSettingsBlock {
+function New-WindowsPeArtifacts {
     param([hashtable]$Config)
 
     if (-not [bool]$Config.wipe_repartition_drive) {
-        return ''
+        return @{ SettingsBlock = ''; DiskPartScript = $null }
     }
 
     $diskId = [int]$Config.wipe_repartition_disk_id
@@ -152,38 +155,42 @@ function New-WindowsPeSettingsBlock {
 
     Write-Host ''
     Write-Host "Destructive partitioning is ENABLED for disk $diskId." -ForegroundColor Yellow
-    Write-Host "Generated Autounattend.xml will clean disk $diskId and create EFI $efiSize MB, MSR $msrSize MB, Windows, and WinRE $recoverySize MB partitions." -ForegroundColor Yellow
+    Write-Host "USB-root $script:DiskPartScriptFileName will clean disk $diskId and create EFI $efiSize MB, MSR $msrSize MB, Windows, and WinRE $recoverySize MB partitions." -ForegroundColor Yellow
 
-    $diskPartCommand = @(
+    # Letters S/W with noerr instead of C: WinPE often assigns C: to the USB stick when the
+    # target disk is blank, and a failed assign makes diskpart /s abort every later command.
+    # ImageInstall targets DiskID/PartitionID, so these letters are diagnostic only.
+    $diskPartScript = @(
         "select disk $diskId",
         'clean',
         'convert gpt',
         "create partition efi size=$efiSize",
         'format quick fs=fat32 label=System',
-        'assign letter=S',
+        'assign letter=S noerr',
         "create partition msr size=$msrSize",
         'create partition primary',
         "shrink desired=$recoverySize minimum=$recoverySize",
         'format quick fs=ntfs label=Windows',
-        'assign letter=C',
+        'assign letter=W noerr',
         'create partition primary',
         'format quick fs=ntfs label=WinRE',
         'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac',
         'gpt attributes=0x8000000000000001',
-        'list volume'
-    )
+        'list volume',
+        'exit'
+    ) -join "`r`n"
 
-    $scriptPath = 'X:\OSIT-DiskPart.txt'
-    $writeCommands = @()
-    for ($index = 0; $index -lt $diskPartCommand.Count; $index++) {
-        $redirect = if ($index -eq 0) { '>' } else { '>>' }
-        $writeCommands += ('echo {0} {1} {2}' -f $diskPartCommand[$index], $redirect, $scriptPath)
+    # The unattend schema caps RunSynchronousCommand Path at 259 characters, so the diskpart
+    # script ships as a USB-root file and this command only locates the USB (by the presence
+    # of that file) and runs it, logging diskpart output back to the USB for diagnostics.
+    $commandLine = 'cmd.exe /c for %d in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do @if exist %d:\{0} (diskpart /s %d:\{0} > %d:\{1} 2>&1)' -f $script:DiskPartScriptFileName, $script:DiskPartLogFileName
+    if ($commandLine.Length -gt 259) {
+        throw "Generated windowsPE RunSynchronous command is $($commandLine.Length) characters; the unattend Path limit is 259."
     }
 
-    $commandLine = 'cmd.exe /c "{0} & diskpart /s {1}"' -f (($writeCommands -join ' & '), $scriptPath)
     $escapedImageName = ConvertTo-XmlText -Value $imageName
 
-    return @"
+    $settingsBlock = @"
   <settings pass="windowsPE">
     <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <SetupUILanguage>
@@ -198,7 +205,7 @@ function New-WindowsPeSettingsBlock {
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>1</Order>
-          <Description>Wipe disk $diskId and create OSIT Windows 11 UEFI partition layout</Description>
+          <Description>Wipe disk $diskId with USB-root $script:DiskPartScriptFileName and create OSIT Windows 11 UEFI partition layout</Description>
           <Path><![CDATA[$commandLine]]></Path>
         </RunSynchronousCommand>
       </RunSynchronous>
@@ -223,6 +230,8 @@ function New-WindowsPeSettingsBlock {
     </component>
   </settings>
 "@
+
+    return @{ SettingsBlock = $settingsBlock; DiskPartScript = $diskPartScript }
 }
 
 function Write-PreparedAutounattend {
@@ -230,7 +239,7 @@ function Write-PreparedAutounattend {
         [string]$SourcePath,
         [string]$TargetPath,
         [string]$Password,
-        [hashtable]$Config
+        [AllowEmptyString()][string]$WindowsPeSettingsBlock
     )
 
     $content = Get-Content -LiteralPath $SourcePath -Raw -ErrorAction Stop
@@ -240,11 +249,11 @@ function Write-PreparedAutounattend {
 
     $escapedPassword = [System.Security.SecurityElement]::Escape($Password)
     $content = $content.Replace('__OSIT_LOCAL_ADMIN_PASSWORD__', $escapedPassword)
-    $content = $content.Replace('  __WINDOWS_PE_SETTINGS__', (New-WindowsPeSettingsBlock -Config $Config).TrimEnd())
-    Set-Content -LiteralPath $TargetPath -Value $content -Encoding UTF8 -Force -ErrorAction Stop
+    $content = $content.Replace('  __WINDOWS_PE_SETTINGS__', $WindowsPeSettingsBlock.TrimEnd())
 
     $xmlValidation = [xml]$content
     if (-not $xmlValidation.unattend) { throw 'Generated Autounattend.xml did not validate as an unattend document.' }
+    Set-Content -LiteralPath $TargetPath -Value $content -Encoding UTF8 -Force -ErrorAction Stop
 }
 
 function Copy-DeploymentFiles {
@@ -354,11 +363,26 @@ if (-not $SkipCopy) {
     Copy-DeploymentFiles -SourceDeployment $sourceDeployment -TargetDeployment $targetDeployment
     Clear-DeploymentState -TargetDeployment $targetDeployment
 
+    $windowsPe = New-WindowsPeArtifacts -Config $deploymentConfig
     $sourceAutounattend = Join-Path $sourceRoot 'Autounattend.xml'
     $targetAutounattend = Join-Path $UsbRoot 'Autounattend.xml'
     if (Test-Path -LiteralPath $sourceAutounattend -PathType Leaf) {
-        Write-PreparedAutounattend -SourcePath $sourceAutounattend -TargetPath $targetAutounattend -Password $ositPassword -Config $deploymentConfig
+        Write-PreparedAutounattend -SourcePath $sourceAutounattend -TargetPath $targetAutounattend -Password $ositPassword -WindowsPeSettingsBlock $windowsPe.SettingsBlock
         Write-Host "Autounattend.xml prepared for OSIT and written to $targetAutounattend" -ForegroundColor Green
+    }
+
+    $targetDiskPartScript = Join-Path $UsbRoot $script:DiskPartScriptFileName
+    $targetDiskPartLog = Join-Path $UsbRoot $script:DiskPartLogFileName
+    if ($null -ne $windowsPe.DiskPartScript) {
+        # ASCII avoids a UTF-8 BOM, which diskpart /s misreads as part of the first command.
+        Set-Content -LiteralPath $targetDiskPartScript -Value $windowsPe.DiskPartScript -Encoding ASCII -Force -ErrorAction Stop
+        Write-Host "DiskPart wipe script written to $targetDiskPartScript" -ForegroundColor Green
+    } elseif (Test-Path -LiteralPath $targetDiskPartScript -PathType Leaf) {
+        Remove-Item -LiteralPath $targetDiskPartScript -Force -ErrorAction Stop
+        Write-Host "Removed stale $targetDiskPartScript because wipe_repartition_drive is disabled." -ForegroundColor Yellow
+    }
+    if (Test-Path -LiteralPath $targetDiskPartLog -PathType Leaf) {
+        Remove-Item -LiteralPath $targetDiskPartLog -Force -ErrorAction SilentlyContinue
     }
 
     if (-not [string]::IsNullOrWhiteSpace($wifiPassword)) {

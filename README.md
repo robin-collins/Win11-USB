@@ -58,6 +58,7 @@ Copy this project to the root of the Windows 11 USB so the USB contains:
 
 ```text
 Autounattend.xml
+OSIT-DiskPart.txt   (generated when wipe_repartition_drive=true)
 Deployment\
   Config\
   Scripts\
@@ -118,7 +119,7 @@ Important `deployment_config.json` options:
 - `windows_image_name`: image name to install from the USB. Default is `Windows 11 Pro`.
 - `require_ac_power`: fail preflight on battery power for notebooks.
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
-- `msp_wifi_setup`: connects to MSP WiFi SSID `OneSolution` before preflight internet checks. Password comes from `OSIT_WIFI_PASSWORD`.
+- `msp_wifi_setup`: connects to MSP WiFi SSID `OneSolution` before preflight internet checks. Password comes from `OSIT_WIFI_PASSWORD`. The step is skipped automatically when the device already has internet (for example Ethernet) or has no wireless adapter.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
 - `configure_power_settings`: sets power timeouts before long-running update and install stages.
@@ -134,6 +135,7 @@ Important `deployment_config.json` options:
 - `datto_rmm_install_arguments`: optional arguments passed to the Datto installer.
 - `datto_rmm_required`: when `true`, fail if the installer completes but Datto/CentraStage is not detected.
 - `install_winget_apps`, `install_local_apps`, `install_offline_drivers`: enable or skip those phases.
+- `winget_bootstrap`: when `true` and winget is not yet available at first logon, the toolkit re-registers App Installer and falls back to `Repair-WinGetPackageManager` from the `Microsoft.WinGet.Client` module before installing apps.
 - `stop_before_domain_join`: documents the intended stopping point. The scripts do not perform customer identity joins.
 
 Do not store customer domain credentials in any config file.
@@ -203,6 +205,8 @@ The Datto UUID is validated during preflight. If it is blank, the Datto install 
 
 `Autounattend.xml` creates the OSIT local administrator account and auto-logs it on once to start the deployment console.
 
+At the end of a successful run, the `Complete` step scrubs cached copies of the answer file (`C:\Windows\Panther`, sysprep) and the Winlogon `DefaultPassword`/autologon registry values so the OSIT password does not remain on the installed system in plaintext.
+
 The repository `Autounattend.xml` contains the placeholder `__OSIT_LOCAL_ADMIN_PASSWORD__`. `Initialize-UsbDeployment.ps1` replaces that placeholder when writing the USB-root `Autounattend.xml`. The generated USB answer file contains the OSIT password in plaintext because Windows setup requires it for local account creation and auto-logon. Protect physical access to the USB.
 
 There are two account stages:
@@ -239,6 +243,15 @@ The generated file:
 - creates the `OSIT` local administrator.
 - auto-logs on once and starts `Deployment\Scripts\Start-Deployment.ps1` from the USB found by label.
 
+When `wipe_repartition_drive` is `true`, `Initialize-UsbDeployment.ps1` writes two partitioning artifacts:
+
+- `OSIT-DiskPart.txt` at the USB root: the full diskpart script (`select disk`, `clean`, `convert gpt`, partition creation, WinRE type and attributes).
+- A short `windowsPE` RunSynchronous command inside the generated `Autounattend.xml` that scans drive letters for `OSIT-DiskPart.txt`, runs `diskpart /s` against it, and writes diskpart output to `OSIT-DiskPart.log` at the USB root for diagnostics.
+
+The diskpart script cannot be embedded in the answer file directly because the unattend schema caps each RunSynchronous command at 259 characters. The script assigns temporary letters `S` and `W` (never `C`, which WinPE frequently gives to the USB stick when the target disk is blank) and uses `noerr` so a letter collision cannot abort partition creation. Windows is installed to disk `wipe_repartition_disk_id`, partition 3, by ID rather than by drive letter.
+
+If partitioning fails, read `OSIT-DiskPart.log` on the USB root to see exactly which diskpart command stopped.
+
 Treat `wipe_repartition_drive=true` as destructive. It is intended for standardised deployments where disk 0 is the target OS disk.
 
 Validate the repository template:
@@ -265,7 +278,7 @@ This uses winget IDs `Microsoft.WindowsADK` and `Microsoft.WindowsADK.WinPEAddon
 
 The `windowsPE` pass is the Windows Setup phase that runs inside Windows PE before the installed operating system is applied. This toolkit uses it only in generated answer files when `wipe_repartition_drive=true`, because that is where disk wipe, GPT partitioning, and image install target settings must be applied.
 
-If Windows Setup fails before wiping the disk with `0x80004005 - 0x40030`, regenerate the USB files with `Initialize-UsbDeployment.ps1` and validate the USB-root answer file. This can happen when the generated `windowsPE` command is malformed or an older `Autounattend.xml` remains on the USB.
+If Windows Setup fails before wiping the disk with `0x80004005 - 0x40030`, regenerate the USB files with `Initialize-UsbDeployment.ps1` and validate the USB-root answer file. Older generated answer files embedded the entire diskpart script in the `windowsPE` command, exceeding the 259-character unattend `Path` limit and causing exactly this error; regenerating produces the current short command plus the USB-root `OSIT-DiskPart.txt` script file.
 
 ## Driver Folders
 

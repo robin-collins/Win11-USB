@@ -357,7 +357,16 @@ function Read-DeploymentState {
     param([Parameter(Mandatory = $true)][string]$StatePath)
 
     if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) { return $null }
-    return Read-JsonFile -Path $StatePath -Required
+    try {
+        return Read-JsonFile -Path $StatePath -Required
+    } catch {
+        $backup = "$StatePath.bak"
+        if (Test-Path -LiteralPath $backup -PathType Leaf) {
+            Write-Log -Level Warn -Message "Deployment state file is unreadable ($($_.Exception.Message)); falling back to backup $backup"
+            return Read-JsonFile -Path $backup -Required
+        }
+        throw
+    }
 }
 
 function Write-DeploymentState {
@@ -402,6 +411,9 @@ function Set-StateStepStarted {
 
     $State.current_step = $Step
     $State.last_error = $null
+    # A stale reboot_pending from an interrupted earlier run must not make the orchestrator
+    # stop after this step completes without requesting its own reboot.
+    $State.reboot_pending = $false
     Add-StateHistory -State $State -Event 'step_started' -Data @{ step = $Step }
     Write-DeploymentState -State $State -StatePath $StatePath
 }
@@ -447,18 +459,70 @@ function Set-StateFailure {
     Write-DeploymentState -State $State -StatePath $StatePath
 }
 
+function Test-UsableSerialNumber {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$SerialNumber)
+
+    if ([string]::IsNullOrWhiteSpace($SerialNumber)) { return $false }
+    # Whitebox and some VM firmware report these instead of a real serial; treating them as
+    # identity would make unrelated devices match each other's state and share log folders.
+    $placeholders = @(
+        'to be filled by o.e.m.', 'default string', 'system serial number',
+        'none', 'unknown', 'not specified', 'not available', 'na', 'n/a', '0', '0123456789'
+    )
+    return ($placeholders -notcontains $SerialNumber.Trim().ToLowerInvariant())
+}
+
+function Test-UsableDeviceUuid {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Uuid)
+
+    if ([string]::IsNullOrWhiteSpace($Uuid)) { return $false }
+    $value = $Uuid.Trim()
+    if ($value -match '^0{8}-0{4}-0{4}-0{4}-0{12}$') { return $false }
+    if ($value -match '^[Ff]{8}-[Ff]{4}-[Ff]{4}-[Ff]{4}-[Ff]{12}$') { return $false }
+    return $true
+}
+
+function Get-DeviceFolderName {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][hashtable]$Identity)
+
+    if (Test-UsableSerialNumber -SerialNumber $Identity.serial_number) {
+        return (Get-SafeName -Value $Identity.serial_number -Fallback $Identity.computer_name)
+    }
+    return (Get-SafeName -Value $Identity.computer_name -Fallback 'Unknown_Device')
+}
+
 function Test-StateMatchesDevice {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][hashtable]$State)
 
     $identity = Get-DeviceIdentity
-    $serialMatches = -not [string]::IsNullOrWhiteSpace($State.device_serial_number) -and
-        -not [string]::IsNullOrWhiteSpace($identity.serial_number) -and
-        ($State.device_serial_number -eq $identity.serial_number)
-    $uuidMatches = -not [string]::IsNullOrWhiteSpace($State.device_uuid) -and
-        -not [string]::IsNullOrWhiteSpace($identity.uuid) -and
-        ($State.device_uuid -eq $identity.uuid)
-    return ($serialMatches -or $uuidMatches)
+    $stateSerial = [string]$State.device_serial_number
+    $stateUuid = [string]$State.device_uuid
+
+    $currentSerialUsable = Test-UsableSerialNumber -SerialNumber $identity.serial_number
+    $currentUuidUsable = Test-UsableDeviceUuid -Uuid $identity.uuid
+    $stateSerialUsable = Test-UsableSerialNumber -SerialNumber $stateSerial
+    $stateUuidUsable = Test-UsableDeviceUuid -Uuid $stateUuid
+
+    if ($stateSerialUsable -and $currentSerialUsable -and ($stateSerial -eq $identity.serial_number)) { return $true }
+    if ($stateUuidUsable -and $currentUuidUsable -and ($stateUuid -ieq $identity.uuid)) { return $true }
+
+    if (-not $currentSerialUsable -and -not $currentUuidUsable -and -not $stateSerialUsable -and -not $stateUuidUsable) {
+        # Neither this device's firmware nor the recorded state offers usable identity, so
+        # the computer name (including a pending rename recorded in state) is the only
+        # remaining way to recognise the device.
+        $knownNames = @([string]$State.computer_name)
+        if ($State.ContainsKey('desired_computer_name')) { $knownNames += [string]$State.desired_computer_name }
+        if (@($knownNames | Where-Object { $_ -and ($_ -ieq $env:COMPUTERNAME) }).Count -gt 0) {
+            Write-Log -Level Warn -Message 'Device serial number and UUID are unusable placeholders; matched deployment state by computer name instead.'
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Initialize-DeploymentLogging {
@@ -470,7 +534,7 @@ function Initialize-DeploymentLogging {
 
     $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
     $identity = Get-DeviceIdentity
-    $safeDevice = Get-SafeName -Value $identity.serial_number -Fallback $identity.computer_name
+    $safeDevice = Get-DeviceFolderName -Identity $identity
     $runId = $State.deployment_run_id
     $logDir = Join-Path (Join-Path $paths.Logs $safeDevice) $runId
     New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
@@ -538,6 +602,43 @@ function Write-Log {
     Write-StructuredLog -Level $Level -Message $Message -Data $Data
 }
 
+function ConvertTo-ProcessArgumentString {
+    [CmdletBinding()]
+    param([string[]]$Arguments = @())
+
+    # Windows PowerShell 5.1 Start-Process joins an -ArgumentList array with spaces WITHOUT
+    # quoting, so any argument containing a space is split by the target process. Arguments
+    # are therefore quoted here (Win32 CommandLineToArgvW rules) and passed as one string.
+    $quoted = foreach ($argument in $Arguments) {
+        $value = [string]$argument
+        if ($value.Length -gt 0 -and $value -notmatch '[\s"]') {
+            $value
+            continue
+        }
+        $builder = New-Object System.Text.StringBuilder
+        [void]$builder.Append('"')
+        $pendingBackslashes = 0
+        foreach ($char in $value.ToCharArray()) {
+            if ($char -eq '\') { $pendingBackslashes++; continue }
+            if ($char -eq '"') {
+                [void]$builder.Append('\' * ($pendingBackslashes * 2 + 1))
+                [void]$builder.Append('"')
+                $pendingBackslashes = 0
+                continue
+            }
+            if ($pendingBackslashes -gt 0) {
+                [void]$builder.Append('\' * $pendingBackslashes)
+                $pendingBackslashes = 0
+            }
+            [void]$builder.Append($char)
+        }
+        if ($pendingBackslashes -gt 0) { [void]$builder.Append('\' * ($pendingBackslashes * 2)) }
+        [void]$builder.Append('"')
+        $builder.ToString()
+    }
+    return (@($quoted) -join ' ')
+}
+
 function Invoke-ExternalCommand {
     [CmdletBinding()]
     param(
@@ -555,13 +656,20 @@ function Invoke-ExternalCommand {
     $tempBase = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString('N'))
     $stdoutPath = "$tempBase.out"
     $stderrPath = "$tempBase.err"
-    $argumentLine = ($Arguments | ForEach-Object {
-            if ($_ -match '\s|"' ) { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
-        }) -join ' '
+    $argumentLine = ConvertTo-ProcessArgumentString -Arguments $Arguments
 
     Write-Log -Level Info -Message "Running: $FilePath $argumentLine"
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory `
-        -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $startParams = @{
+        FilePath               = $FilePath
+        WorkingDirectory       = $WorkingDirectory
+        NoNewWindow            = $true
+        Wait                   = $true
+        PassThru               = $true
+        RedirectStandardOutput = $stdoutPath
+        RedirectStandardError  = $stderrPath
+    }
+    if (-not [string]::IsNullOrEmpty($argumentLine)) { $startParams.ArgumentList = $argumentLine }
+    $process = Start-Process @startParams
 
     $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { '' }
     $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { '' }
@@ -592,16 +700,36 @@ function Split-CommandLineArguments {
     param([AllowEmptyString()][string]$ArgumentString)
 
     if ([string]::IsNullOrWhiteSpace($ArgumentString)) { return @() }
-    $matches = [regex]::Matches($ArgumentString, '("[^"]*"|''[^'']*''|\S+)')
-    $args = @()
-    foreach ($match in $matches) {
+    $tokenMatches = [regex]::Matches($ArgumentString, '("[^"]*"|''[^'']*''|\S+)')
+    $parsedArguments = @()
+    foreach ($match in $tokenMatches) {
         $value = $match.Value
         if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
             $value = $value.Substring(1, $value.Length - 2)
         }
-        $args += $value
+        $parsedArguments += $value
     }
-    return $args
+    return $parsedArguments
+}
+
+function Invoke-WithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = 3,
+        [int]$DelaySeconds = 10,
+        [string]$OperationName = 'operation'
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            return (& $ScriptBlock)
+        } catch {
+            if ($attempt -ge $MaxAttempts) { throw }
+            Write-Log -Level Warn -Message "$OperationName attempt $attempt of $MaxAttempts failed: $($_.Exception.Message). Retrying in $DelaySeconds second(s)."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
 }
 
 function Test-InternetConnectivity {
@@ -653,8 +781,11 @@ function Register-DeploymentResumeTask {
         throw "Resume script missing: $resumeScript"
     }
 
-    $action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$resumeScript`""
-    Invoke-ExternalCommand -FilePath schtasks.exe -Arguments @('/Create', '/TN', $script:DeploymentTaskName, '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F', '/TR', $action) -LogName 'register-resume-task.log' | Out-Null
+    $userId = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $resumeScript)
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $script:DeploymentTaskName -Action $action -Trigger $trigger -Principal $principal -Force -ErrorAction Stop | Out-Null
     Write-Log -Level Success -Message "Resume scheduled task is registered: $script:DeploymentTaskName"
 }
 
@@ -663,7 +794,10 @@ function Unregister-DeploymentResumeTask {
     param()
 
     try {
-        Invoke-ExternalCommand -FilePath schtasks.exe -Arguments @('/Delete', '/TN', $script:DeploymentTaskName, '/F') -AllowedExitCodes @(0, 1) -LogName 'unregister-resume-task.log' | Out-Null
+        if (Get-ScheduledTask -TaskName $script:DeploymentTaskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $script:DeploymentTaskName -Confirm:$false -ErrorAction Stop
+            Write-Log -Level Success -Message "Resume scheduled task removed: $script:DeploymentTaskName"
+        }
     } catch {
         Write-Log -Level Warn -Message "Unable to remove resume task: $($_.Exception.Message)"
     }
@@ -826,7 +960,7 @@ function Get-DeploymentReportRoot {
 
     $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
     $identity = Get-DeviceIdentity
-    $safeDevice = Get-SafeName -Value $identity.serial_number -Fallback $identity.computer_name
+    $safeDevice = Get-DeviceFolderName -Identity $identity
     $reportRoot = Join-Path $paths.Reports $safeDevice
     New-Item -ItemType Directory -Path $reportRoot -Force -ErrorAction Stop | Out-Null
     return $reportRoot

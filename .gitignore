@@ -6,6 +6,10 @@
 Autounattend.generated.xml
 Autounattend.local.xml
 
+# Generated WinPE partitioning artifacts (written to the USB root by Initialize-UsbDeployment.ps1)
+OSIT-DiskPart.txt
+OSIT-DiskPart.log
+
 # Deployment runtime output
 Deployment/State/*.json
 Deployment/State/*.bak

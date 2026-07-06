@@ -54,7 +54,7 @@ function Get-CommonDesktopPath {
 function Get-UserDesktopPath {
     param([Parameter(Mandatory = $true)][string]$Username)
 
-    $profile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
+    $userProfile = Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
         Where-Object {
             -not $_.Special -and
             $_.LocalPath -and
@@ -62,7 +62,10 @@ function Get-UserDesktopPath {
         } |
         Select-Object -First 1
 
-    $profilePath = if ($profile) { $profile.LocalPath } else { Join-Path 'C:\Users' $Username }
+    $profilePath = if ($userProfile) { $userProfile.LocalPath } else { Join-Path 'C:\Users' $Username }
+    # Creating the folder before Windows builds the profile makes first logon fall back to
+    # a user.COMPUTERNAME profile directory, so a missing profile is skipped instead.
+    if (-not (Test-Path -LiteralPath $profilePath -PathType Container)) { return $null }
     $desktopPath = Join-Path $profilePath 'Desktop'
     New-Item -ItemType Directory -Path $desktopPath -Force -ErrorAction Stop | Out-Null
     return $desktopPath
@@ -198,7 +201,12 @@ if ([bool]$desktopConfig.manage_common_desktop) {
 }
 
 if ([bool]$desktopConfig.manage_final_user_desktop) {
-    $results += ,(Sync-DesktopItems -DesktopPath (Get-UserDesktopPath -Username $finalUser) -DesiredItems @($desktopConfig.final_user_desktop_items) -PreservePatterns @($desktopConfig.preserve_patterns) -RemoveUnapproved ([bool]$desktopConfig.remove_unapproved_shortcuts) -UsbRoot $UsbRoot)
+    $finalUserDesktop = Get-UserDesktopPath -Username $finalUser
+    if ($finalUserDesktop) {
+        $results += ,(Sync-DesktopItems -DesktopPath $finalUserDesktop -DesiredItems @($desktopConfig.final_user_desktop_items) -PreservePatterns @($desktopConfig.preserve_patterns) -RemoveUnapproved ([bool]$desktopConfig.remove_unapproved_shortcuts) -UsbRoot $UsbRoot)
+    } else {
+        Write-Log -Level Warn -Message "Profile for final user '$finalUser' does not exist yet; skipping final user desktop configuration."
+    }
 }
 
 if ($state) {

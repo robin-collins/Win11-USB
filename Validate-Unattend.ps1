@@ -52,8 +52,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$Path = (Join-Path $PSScriptRoot 'Autounattend.xml'),
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'Deployment\Config\deployment_config.json'),
+    [string]$Path,
+    [string]$ConfigPath,
     [string]$DllPath,
     [switch]$RequireSchema,
     [switch]$InstallAdkWithWinget,
@@ -63,6 +63,12 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+# $PSScriptRoot can be empty during param default evaluation when invoked with powershell -File,
+# so the path defaults are resolved here instead of in the param block.
+$scriptRoot = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if ([string]::IsNullOrWhiteSpace($Path)) { $Path = Join-Path $scriptRoot 'Autounattend.xml' }
+if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $scriptRoot 'Deployment\Config\deployment_config.json' }
 
 if (-not $Generated -and -not $Template) { $Template = $true }
 if ($Generated -and $Template) { throw 'Use only one of -Generated or -Template.' }
@@ -240,8 +246,9 @@ function Test-WingetPackageInstalled {
         [Parameter(Mandatory = $true)][string]$PackageId
     )
 
-    $result = Invoke-ProcessCapture -FilePath $WingetPath -Arguments @('list', '--id', $PackageId, '--exact', '--accept-source-agreements') -AllowedExitCodes @(0, 1)
-    return ($result.exit_code -eq 0 -and $result.stdout -match [regex]::Escape($PackageId))
+    # winget list exits with NO_APPLICATIONS_FOUND (0x8A150014 = -1978335212) when absent.
+    $result = Invoke-ProcessCapture -FilePath $WingetPath -Arguments @('list', '--id', $PackageId, '--exact', '--accept-source-agreements') -AllowedExitCodes @(0, 1, -1978335212)
+    return ($result.exit_code -eq 0)
 }
 
 function Install-AdkPackagesWithWinget {
@@ -318,6 +325,17 @@ function Read-JsonHashtable {
     $raw = Get-Content -LiteralPath $JsonPath -Raw
     if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
     return $raw | ConvertFrom-Json
+}
+
+function Get-ConfigProperty {
+    param(
+        [object]$Config,
+        [string]$Name,
+        [object]$Default
+    )
+
+    if ($Config -and $Config.PSObject.Properties[$Name] -and $null -ne $Config.$Name) { return $Config.$Name }
+    return $Default
 }
 
 function Get-UnattendNamespaceManager {
@@ -435,22 +453,53 @@ try {
     $windowsPeSettings = @($xml.SelectNodes('//u:settings[@pass="windowsPE"]', $ns))
     if ($windowsPeSettings.Count -gt 0) {
         Add-ValidationResult -Status Pass -Check 'windowsPE pass' -Message 'windowsPE pass is present.'
-        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install disk' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:DiskID' -Expected '0'
+        $expectedDiskId = [string](Get-ConfigProperty -Config $config -Name 'wipe_repartition_disk_id' -Default 0)
+        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install disk' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:DiskID' -Expected $expectedDiskId
         Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install partition' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:PartitionID' -Expected '3'
 
         $runSync = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path'
-        foreach ($fragment in @('clean', 'convert gpt', 'create partition efi size=512', 'create partition msr size=16', 'shrink desired=2048 minimum=2048', 'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac', 'gpt attributes=0x8000000000000001')) {
-            if ($runSync -match [regex]::Escape($fragment)) {
-                Add-ValidationResult -Status Pass -Check "Partition command: $fragment" -Message 'Expected partition command fragment found.'
-            } else {
-                Add-ValidationResult -Status Fail -Check "Partition command: $fragment" -Message 'Expected partition command fragment missing.'
-            }
+        if ($runSync -and $runSync.Length -le 259) {
+            Add-ValidationResult -Status Pass -Check 'windowsPE command length' -Message "RunSynchronous command is $($runSync.Length) characters (limit 259)."
+        } else {
+            $actualLength = if ($runSync) { $runSync.Length } else { 0 }
+            Add-ValidationResult -Status Fail -Check 'windowsPE command length' -Message "RunSynchronous command is $actualLength characters; the unattend Path limit is 259 and Windows Setup fails with 0x80004005 - 0x40030 when it is exceeded."
         }
 
-        if ($runSync -match 'label="' -or $runSync -match 'letter="' -or $runSync -match 'set id="') {
-            Add-ValidationResult -Status Fail -Check 'Partition command quoting' -Message 'DiskPart command contains nested quoted label, drive letter, or GUID values that can break cmd.exe parsing during windowsPE.'
+        if ($runSync -match 'OSIT-DiskPart\.txt' -and $runSync -match 'diskpart\s+/s') {
+            Add-ValidationResult -Status Pass -Check 'DiskPart script reference' -Message 'RunSynchronous command locates USB-root OSIT-DiskPart.txt and runs diskpart /s against it.'
         } else {
-            Add-ValidationResult -Status Pass -Check 'Partition command quoting' -Message 'DiskPart command avoids nested quoted values inside cmd.exe payload.'
+            Add-ValidationResult -Status Fail -Check 'DiskPart script reference' -Message 'RunSynchronous command does not reference USB-root OSIT-DiskPart.txt with diskpart /s.'
+        }
+
+        $diskPartScriptPath = Join-Path (Split-Path -Parent $resolvedPath) 'OSIT-DiskPart.txt'
+        if (Test-Path -LiteralPath $diskPartScriptPath -PathType Leaf) {
+            Add-ValidationResult -Status Pass -Check 'DiskPart script file' -Message "Companion diskpart script found: $diskPartScriptPath"
+            $diskPartContent = Get-Content -LiteralPath $diskPartScriptPath -Raw
+
+            $efiSize = [int](Get-ConfigProperty -Config $config -Name 'efi_partition_size_mb' -Default 512)
+            $msrSize = [int](Get-ConfigProperty -Config $config -Name 'msr_partition_size_mb' -Default 16)
+            $recoverySize = [int](Get-ConfigProperty -Config $config -Name 'recovery_partition_size_mb' -Default 2048)
+            foreach ($fragment in @("select disk $expectedDiskId", 'clean', 'convert gpt', "create partition efi size=$efiSize", "create partition msr size=$msrSize", "shrink desired=$recoverySize minimum=$recoverySize", 'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac', 'gpt attributes=0x8000000000000001')) {
+                if ($diskPartContent -match [regex]::Escape($fragment)) {
+                    Add-ValidationResult -Status Pass -Check "Partition command: $fragment" -Message 'Expected partition command fragment found.'
+                } else {
+                    Add-ValidationResult -Status Fail -Check "Partition command: $fragment" -Message 'Expected partition command fragment missing from OSIT-DiskPart.txt.'
+                }
+            }
+
+            if ($diskPartContent -match '(?im)^\s*assign\s+letter=C\b') {
+                Add-ValidationResult -Status Fail -Check 'DiskPart drive letters' -Message 'Script assigns letter C, which WinPE often gives to the USB stick on a blank disk; a failed assign aborts the rest of the diskpart script.'
+            } else {
+                Add-ValidationResult -Status Pass -Check 'DiskPart drive letters' -Message 'Script avoids assigning drive letter C during WinPE.'
+            }
+
+            if ($diskPartContent -match 'label="' -or $diskPartContent -match 'letter="' -or $diskPartContent -match 'set id="') {
+                Add-ValidationResult -Status Fail -Check 'Partition command quoting' -Message 'DiskPart script contains quoted label, drive letter, or GUID values that diskpart /s does not require.'
+            } else {
+                Add-ValidationResult -Status Pass -Check 'Partition command quoting' -Message 'DiskPart script avoids unnecessary quoted values.'
+            }
+        } else {
+            Add-ValidationResult -Status Fail -Check 'DiskPart script file' -Message "windowsPE pass expects OSIT-DiskPart.txt beside the answer file, but it was not found: $diskPartScriptPath"
         }
     } elseif ($config -and $config.wipe_repartition_drive -eq $true -and -not $isTemplate) {
         Add-ValidationResult -Status Fail -Check 'windowsPE pass' -Message 'Config expects wipe_repartition_drive=true, but generated XML has no windowsPE pass.'

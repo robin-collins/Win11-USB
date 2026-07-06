@@ -77,14 +77,22 @@ $passwordEnvVar = [string]$wifi.password_env_var
 if ([string]::IsNullOrWhiteSpace($passwordEnvVar)) { $passwordEnvVar = 'OSIT_WIFI_PASSWORD' }
 if ($passwordEnvVar -ne 'OSIT_WIFI_PASSWORD') { Write-Log -Level Warn -Message "Custom WiFi password variable '$passwordEnvVar' configured; OSIT_WIFI_PASSWORD remains the documented standard." }
 
-$wirelessAdapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.NdisPhysicalMedium -eq 9 -or $_.InterfaceDescription -match 'Wireless|Wi-?Fi|802\.11' })
-if ($wirelessAdapters.Count -eq 0) {
-    throw 'MSP WiFi setup is enabled but no wireless network adapter was detected.'
-}
-
 $connectedSsid = Get-ConnectedWifiSsid
 if ($connectedSsid -eq $ssid) {
     Write-Log -Level Success -Message "Already connected to WiFi SSID '$ssid'."
+    return
+}
+
+# A wired (or otherwise connected) machine does not need MSP WiFi; failing here would
+# stop deployments on Ethernet-connected desktops and docked notebooks.
+if (Test-InternetConnectivity) {
+    Write-Log -Level Success -Message 'Internet connectivity is already available; skipping MSP WiFi setup.'
+    return
+}
+
+$wirelessAdapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.NdisPhysicalMedium -eq 9 -or $_.InterfaceDescription -match 'Wireless|Wi-?Fi|802\.11' })
+if ($wirelessAdapters.Count -eq 0) {
+    Write-Log -Level Warn -Message 'MSP WiFi setup is enabled but no wireless network adapter was detected; skipping. Preflight will verify internet connectivity.'
     return
 }
 

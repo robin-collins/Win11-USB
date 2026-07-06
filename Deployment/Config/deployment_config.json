@@ -1,6 +1,6 @@
 {
   "minimum_free_space_gb": 25,
-  "wipe_repartition_drive": true,
+  "wipe_repartition_drive": false,
   "wipe_repartition_disk_id": 0,
   "efi_partition_size_mb": 512,
   "msr_partition_size_mb": 16,

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$UsbRoot,
-    [string]$StatePath
+    [string]$StatePath,
+    [switch]$NonInteractive
 )
 
 Set-StrictMode -Version 2.0
@@ -69,6 +70,16 @@ Write-Host "  Raw model:    $($system.Model)"
 Write-Host "  Folder name:  $manufacturer\\$model"
 Write-Host "  Full path:    $driverFolder"
 Write-Host ''
+
+if ($NonInteractive) {
+    # A Read-Host here would hang an unattended resume forever; the folder path is logged
+    # so drivers can be added and the deployment rerun later if needed.
+    Write-Log -Level Warn -Message "Non-interactive session: continuing without offline drivers for $manufacturer\\$model. Copy drivers to $driverFolder and rerun to install them."
+    Add-StateHistory -State $state -Event 'model_drivers_skipped_noninteractive' -Data @{ folder = $driverFolder }
+    Write-DeploymentState -State $state -StatePath $StatePath
+    return
+}
+
 Write-Host 'A) Recheck the newly created folder now for drivers to install'
 Write-Host 'B) Continue without installing additional offline drivers'
 

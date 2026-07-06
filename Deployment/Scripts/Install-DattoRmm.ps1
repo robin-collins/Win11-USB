@@ -69,8 +69,9 @@ $downloadLog = if ($script:DeploymentLogContext) { Join-Path $script:DeploymentL
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
     Write-Log -Level Info -Message "Downloading Datto RMM agent for site $siteId."
-    $client = New-Object System.Net.WebClient
-    $client.DownloadFile($downloadUrl, $installerPath)
+    Invoke-WithRetry -OperationName 'Datto RMM agent download' -MaxAttempts 3 -DelaySeconds 15 -ScriptBlock {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+    } | Out-Null
     Set-Content -LiteralPath $downloadLog -Value @(
         "Downloaded: $((Get-Date).ToString('o'))",
         "URL: $downloadUrl",
@@ -79,16 +80,25 @@ try {
     ) -Encoding UTF8 -Force
 } catch {
     throw "Failed to download Datto RMM agent from $downloadUrl`: $($_.Exception.Message)"
-} finally {
-    if ($client) { $client.Dispose() }
 }
 
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "Datto RMM installer was not downloaded: $installerPath"
 }
 
+# The installer runs elevated, so refuse anything that is not validly signed.
+$signature = Get-AuthenticodeSignature -FilePath $installerPath
+if ($signature.Status -ne 'Valid') {
+    throw "Datto RMM installer Authenticode signature status is '$($signature.Status)'; refusing to run it. Verify the site UUID and download URL."
+}
+Write-Log -Level Info -Message "Datto RMM installer signature is valid: $($signature.SignerCertificate.Subject)"
+
 $arguments = Split-CommandLineArguments -ArgumentString ([string]$config.datto_rmm_install_arguments)
-$install = Invoke-ExternalCommand -FilePath $installerPath -Arguments $arguments -AllowedExitCodes @(0, 3010) -LogName 'datto-rmm-install.log'
+try {
+    $install = Invoke-ExternalCommand -FilePath $installerPath -Arguments $arguments -AllowedExitCodes @(0, 3010) -LogName 'datto-rmm-install.log'
+} finally {
+    Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+}
 
 $installedAfter = Test-DattoRmmInstalled
 if (-not $installedAfter -and [bool]$config.datto_rmm_required) {

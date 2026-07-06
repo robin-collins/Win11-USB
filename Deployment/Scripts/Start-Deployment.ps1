@@ -99,6 +99,10 @@ function Invoke-ComputerNameStep {
     } else {
         switch ($mode) {
             'prompt' {
+                if ($NonInteractive) {
+                    Write-Log -Level Warn -Message 'computer_name_mode=prompt but the session is non-interactive; keeping the current computer name.'
+                    return
+                }
                 do {
                     $inputName = Read-Host 'Enter desired computer name, or press Enter to keep current name'
                     if ([string]::IsNullOrWhiteSpace($inputName)) {
@@ -333,7 +337,7 @@ function Invoke-DeploymentStep {
             & (Join-Path $PSScriptRoot 'Get-AssetInventory.ps1') -UsbRoot $UsbRoot -OutputPath $inventoryPath | Out-Null
         }
         'ModelDrivers' {
-            if ([bool]$Config.install_offline_drivers) { & (Join-Path $PSScriptRoot 'Install-ModelDrivers.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
+            if ([bool]$Config.install_offline_drivers) { & (Join-Path $PSScriptRoot 'Install-ModelDrivers.ps1') -UsbRoot $UsbRoot -StatePath $StatePath -NonInteractive:$NonInteractive }
             else { Write-Log -Level Info -Message 'Offline driver installation is disabled by config.' }
         }
         'WingetApps' {
@@ -352,6 +356,27 @@ function Invoke-DeploymentStep {
         'FinalReport' { & (Join-Path $PSScriptRoot 'Write-DeploymentReport.ps1') -UsbRoot $UsbRoot -StatePath $StatePath | Out-Null }
         'Complete' {
             Unregister-DeploymentResumeTask
+            $unattendPaths = @(
+                "$env:windir\Panther\unattend.xml",
+                "$env:windir\Panther\Autounattend.xml",
+                "$env:windir\Panther\Unattend\unattend.xml",
+                "$env:windir\Panther\UnattendGC\unattend.xml",
+                "$env:windir\System32\sysprep\unattend.xml"
+            )
+            foreach ($xmlPath in $unattendPaths) {
+                if (Test-Path -LiteralPath $xmlPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue
+                    Write-Log -Level Info -Message "Scrubbed cached unattend file at $xmlPath to protect credentials."
+                }
+            }
+            # Unattend AutoLogon can leave the OSIT password in plaintext under Winlogon.
+            $winlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+            foreach ($valueName in @('DefaultPassword', 'AutoAdminLogon', 'AutoLogonCount')) {
+                if (Get-ItemProperty -LiteralPath $winlogonKey -Name $valueName -ErrorAction SilentlyContinue) {
+                    Remove-ItemProperty -LiteralPath $winlogonKey -Name $valueName -ErrorAction SilentlyContinue
+                    Write-Log -Level Info -Message "Scrubbed Winlogon value $valueName to protect credentials."
+                }
+            }
             Write-Log -Level Success -Message 'Deployment task sequence complete. Device is ready for domain join / Entra join / customer onboarding.'
         }
         default { throw "Unknown deployment step '$Step'." }
@@ -379,6 +404,15 @@ try {
         Write-Log -Level Info -Message "Starting deployment step: $step"
         Invoke-DeploymentStep -Step $step -UsbRoot $UsbRoot -State $state -StatePath $paths.StateFile -Config $config
         $state = Read-DeploymentState -StatePath $paths.StateFile
+
+        # Request-DeploymentReboot's exit only terminates the child step script, not this
+        # orchestrator, so the reboot request must be detected here. The step is left
+        # incomplete on purpose: it resumes from the same step after the reboot.
+        if ($state.ContainsKey('reboot_pending') -and [bool]$state.reboot_pending) {
+            Write-Log -Level Warn -Message "Step $step requested a reboot. The deployment will resume from this step after the next administrator logon."
+            exit 3010
+        }
+
         Set-StateStepCompleted -State $state -Step $step -StatePath $paths.StateFile
         Write-Log -Level Success -Message "Completed deployment step: $step"
     }
