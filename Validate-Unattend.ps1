@@ -1,207 +1,358 @@
 <#
     .SYNOPSIS
-        Test-Unattend.ps1
+        Validates Autounattend.xml for the OSIT Windows 11 USB deployment toolkit.
 
     .DESCRIPTION
-        Test-Unattend.ps1
+        Performs practical validation of the repository Autounattend.xml template or a generated
+        USB-root Autounattend.xml file.
+
+        Checks include:
+        - XML well-formedness.
+        - Optional ADK/AIK schema validation when Microsoft.ComponentStudio.ComponentPlatformInterface.dll is available.
+        - Template placeholder handling for __OSIT_LOCAL_ADMIN_PASSWORD__ and __WINDOWS_PE_SETTINGS__.
+        - OSIT local account and AutoLogon consistency.
+        - BypassNRO specialize command.
+        - FirstLogonCommand points back to USB label 1S-WIN11 and Start-Deployment.ps1.
+        - Optional destructive disk layout checks when generated XML contains a windowsPE pass.
+
+    .PARAMETER Path
+        Path to Autounattend.xml. Defaults to .\Autounattend.xml beside this script.
+
+    .PARAMETER ConfigPath
+        Path to deployment_config.json. Used for expectation checks such as wipe_repartition_drive.
+
+    .PARAMETER DllPath
+        Optional explicit path to Microsoft.ComponentStudio.ComponentPlatformInterface.dll.
+
+    .PARAMETER RequireSchema
+        Fail validation if ADK/AIK schema validation cannot be performed.
+
+    .PARAMETER Generated
+        Treat Path as a generated USB-root Autounattend.xml. Generated files should not contain toolkit placeholders.
+
+    .PARAMETER Template
+        Treat Path as the repository template. Template files should contain toolkit placeholders. This is the default.
+
+    .EXAMPLE
+        .\Validate-Unattend.ps1
+
+    .EXAMPLE
+        .\Validate-Unattend.ps1 -Path E:\Autounattend.xml -Generated
 
     .NOTES
-        For additonal information please contact david.wallis@transunion.co.uk
-
-    .LINK
+        Schema extraction functions are based on:
         https://gist.github.com/davidwallis3101/48454cb6c17c988de43b5ea17089ea6f
+        and the unattend schema notes at:
+        http://schneegans.de/computer/unattend-schema/
 #>
 
-Function Get-Schema {
-    <#
-        .SYNOPSIS
-            Get-Schema
+[CmdletBinding()]
+param(
+    [string]$Path = (Join-Path $PSScriptRoot 'Autounattend.xml'),
+    [string]$ConfigPath = (Join-Path $PSScriptRoot 'Deployment\Config\deployment_config.json'),
+    [string]$DllPath,
+    [switch]$RequireSchema,
+    [switch]$Generated,
+    [switch]$Template
+)
 
-        .DESCRIPTION
-            Get-Schema
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
 
-        .PARAMETER Path
-            The path to the DLL to extract the schema from
+if (-not $Generated -and -not $Template) { $Template = $true }
+if ($Generated -and $Template) { throw 'Use only one of -Generated or -Template.' }
 
-        .EXAMPLE
-            PS C:\> Get-Schema -Path "C:\binaries\microsoft.componentstudio.componentplatforminterface.dll"
+$script:ValidationResults = New-Object 'System.Collections.Generic.List[object]'
 
-        .NOTES
-            Based on infomation found via the link below
-            For additonal information please contact david.wallis@transunion.co.uk
-
-        .LINK
-            http://schneegans.de/computer/unattend-schema/
-    #>
-
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string] $Path
+function Add-ValidationResult {
+    param(
+        [ValidateSet('Pass', 'Warn', 'Fail')][string]$Status,
+        [string]$Check,
+        [string]$Message,
+        [object]$Data = $null
     )
+
+    $script:ValidationResults.Add([ordered]@{
+            status  = $Status
+            check   = $Check
+            message = $Message
+            data    = $Data
+        }) | Out-Null
+
+    $color = switch ($Status) {
+        'Pass' { 'Green' }
+        'Warn' { 'Yellow' }
+        'Fail' { 'Red' }
+    }
+    Write-Host "[$Status] $Check - $Message" -ForegroundColor $color
+}
+
+function Get-Schema {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path)
 
     $assembly = [Reflection.Assembly]::LoadFile($Path)
-
     $resNames = $assembly.GetManifestResourceNames()
-    $resname = $resNames[0].Replace(".resources", "")
+    $resName = ($resNames | Where-Object { $_ -like '*.resources' } | Select-Object -First 1)
+    if (-not $resName) { throw "No .resources manifest entry found in $Path" }
 
-    $resMan = New-Object -TypeName System.Resources.ResourceManager -ArgumentList $resname, $assembly
+    $resourceBaseName = $resName.Replace('.resources', '')
+    $resourceManager = New-Object System.Resources.ResourceManager -ArgumentList $resourceBaseName, $assembly
 
-    $language = New-Object System.Globalization.CultureInfo -ArgumentList "en-GB"
-    $resources = $resMan.GetResourceSet($language, $true, $true)
+    foreach ($cultureName in @('en-US', 'en-GB', '')) {
+        $culture = if ($cultureName) { New-Object System.Globalization.CultureInfo -ArgumentList $cultureName } else { [System.Globalization.CultureInfo]::InvariantCulture }
+        $resources = $resourceManager.GetResourceSet($culture, $true, $true)
+        if (-not $resources) { continue }
 
-    foreach ($obj in $resources) {
-        if ($obj.Name -NotLike "Unattend") { continue }
-        [System.Text.Encoding]::ASCII.GetString($obj.Value)
+        foreach ($resource in $resources) {
+            if ($resource.Name -ne 'Unattend') { continue }
+            return [System.Text.Encoding]::ASCII.GetString($resource.Value)
+        }
     }
+
+    throw "Unattend schema resource was not found in $Path"
 }
 
-Function Test-Xml {
-    <#
-        .SYNOPSIS
-            Test-Xml
+function Find-UnattendSchemaDll {
+    $candidateNames = @(
+        'Microsoft.ComponentStudio.ComponentPlatformInterface.dll',
+        'microsoft.componentstudio.componentplatforminterface.dll'
+    )
+    $roots = @(
+        "${env:ProgramFiles(x86)}\Windows Kits",
+        "$env:ProgramFiles\Windows Kits",
+        "${env:ProgramFiles(x86)}\Windows AIK",
+        "$env:ProgramFiles\Windows AIK"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
 
-        .DESCRIPTION
-            Validates an xml file against an xml schema file.
+    foreach ($root in $roots) {
+        foreach ($name in $candidateNames) {
+            $match = Get-ChildItem -LiteralPath $root -Filter $name -Recurse -File -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending |
+                Select-Object -First 1
+            if ($match) { return $match.FullName }
+        }
+    }
 
-        .PARAMETER SchemaFile
-            The schema file to use for validation
+    return $null
+}
 
-        .PARAMETER Schema
-            The schema to use for validation when stored as a string
-
-        .PARAMETER XmlFile
-            The xml file to validate
-
-        .PARAMETER ValidationEventHandler
-            Scriptblock to be executed when a validation error occurs
-
-        .EXAMPLE
-            PS C:\> dir *.xml | Test-XmlFile -SchemaFile schema.xsd
-
-        .EXAMPLE
-            PS C:\> dir *.xml | Test-XmlFile -Schema $schema
-
-        .NOTES
-            Based on answer from stackoverflow linked below
-            For additonal information please contact david.wallis@transunion.co.uk
-
-        .LINK
-            https://stackoverflow.com/questions/822907/how-do-i-use-powershell-to-validate-xml-files-against-an-xsd/21283694
-    #>
-
-    [CmdletBinding(DefaultParameterSetName = 'File')]
-    Param (
-        [Parameter(Mandatory = $True, ParameterSetName = 'File' )]
-        [ValidateScript({
-            if(-Not ($_ | Test-Path) ){
-                throw "File does not exist"
-            }
-            if(-Not ($_ | Test-Path -PathType Leaf) ){
-                throw "The Path argument must be a file. Folder paths are not allowed."
-            }
-            return $true
-        })]
-        [System.IO.FileInfo] $SchemaFile,
-
-        [Parameter(Mandatory = $True, ParameterSetName = 'String')]
-        [string] $Schema,
-
-        [Parameter(ValueFromPipeline=$true, Mandatory=$true, ValueFromPipelineByPropertyName=$true)]
-        [alias('Fullname')]
-        [ValidateScript({
-            if(-Not ($_ | Test-Path) ){
-                throw "File does not exist"
-            }
-            if(-Not ($_ | Test-Path -PathType Leaf) ){
-                throw "The Path argument must be a file. Folder paths are not allowed."
-            }
-            return $true
-        })]
-        [System.IO.FileInfo] $XmlFile,
-
-        [scriptblock] $ValidationEventHandler = { Write-Error $args[1].Exception }
+function Test-XmlSchema {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$XmlPath,
+        [Parameter(Mandatory = $true)][string]$SchemaText
     )
 
-    Begin {
-        If ($PSCmdlet.ParameterSetName -eq "File") {
-            $schemaFromFile = Get-Content $SchemaFile -Raw
-            $schemaReader = New-Object System.IO.StringReader($schemaFromFile)
-        } else {
-            $schemaReader = New-Object System.IO.StringReader($Schema)
-        }
-
-        [System.Xml.Schema.XmlSchema]$schema = ([System.Xml.Schema.XmlSchema]::Read($schemaReader, $ValidationEventHandler))
+    $validationErrors = New-Object 'System.Collections.Generic.List[string]'
+    $handler = [System.Xml.Schema.ValidationEventHandler]{
+        param($sender, $eventArgs)
+        $validationErrors.Add($eventArgs.Exception.Message) | Out-Null
     }
 
-    Process {
-        try {
-            $xml = New-Object System.Xml.XmlDocument
-            $xml.Schemas.Add($schema) | Out-Null
-            $xml.Load($XmlFile.FullName)
-            write-verbose "Validating XML Schema for file $($XmlFile)"
-            $xml.Validate($ValidationEventHandler)
-
-        } catch {
-            Write-Error $_
-        }
-    }
-
-    End {
+    $schemaReader = New-Object System.IO.StringReader($SchemaText)
+    try {
+        $schema = [System.Xml.Schema.XmlSchema]::Read($schemaReader, $handler)
+        $xml = New-Object System.Xml.XmlDocument
+        $xml.Schemas.Add($schema) | Out-Null
+        $xml.Load($XmlPath)
+        $xml.Validate($handler)
+    } finally {
         $schemaReader.Close()
     }
+
+    return @($validationErrors)
 }
 
-Function Test-Unattend {
-    <#
-        .SYNOPSIS
-            Test-Unattend
-
-        .DESCRIPTION
-            Validates unattend.xml or autounattend.xml against the schema contained within the AIK dll
-
-        .PARAMETER Path
-            The path to the xml file
-
-        .EXAMPLE
-            PS C:\> Get-ChildItem -Path "C:\answer_files\" -Filter "*.xml" -Recurse |
-                        Test-Unattend -DllPath "C:\binaries\microsoft.componentstudio.componentplatforminterface.dll"
-
-        .NOTES
-            For additonal information please contact david.wallis@transunion.co.uk
-    #>
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory=$true, ValueFromPipeline = $true)]
-        [Alias("Path")]
-        [ValidateScript({
-            if(-Not ($_ | Test-Path) ){
-                throw "File does not exist"
-            }
-            if(-Not ($_ | Test-Path -PathType Leaf) ){
-                throw "The Path argument must be a file. Folder paths are not allowed."
-            }
-            return $true
-        })]
-        [System.IO.FileInfo[]]$Files,
-
-        [Parameter(Mandatory=$true)]
-        [string]$DllPath
+function ConvertTo-ValidationXml {
+    param(
+        [string]$Content,
+        [bool]$IsTemplate
     )
 
-    begin {
-        write-verbose ("Extracting schema from {0} Version: {1}" -f (Split-Path $dllpath -Leaf), ([System.Diagnostics.FileVersionInfo]::GetVersionInfo($dllpath).FileVersion))
-        $schemaString = Get-Schema -Path $dllPath
+    $converted = $Content
+    if ($IsTemplate) {
+        $converted = $converted.Replace('__OSIT_LOCAL_ADMIN_PASSWORD__', 'ValidationOnly!123')
+        $converted = $converted.Replace('  __WINDOWS_PE_SETTINGS__', '')
+        $converted = $converted.Replace('__WINDOWS_PE_SETTINGS__', '')
     }
-    process {
-        Foreach ($xmlFile in $Files) {
-            Test-Xml `
-                -Schema $schemaString `
-                -XmlFile $xmlFile.FullName `
-                -ValidationEventHandler { Write-error "Unable to validate schema for $($xmlFile) $($args[1].Exception.Message)" }
-        }
+    return $converted
+}
+
+function Read-JsonHashtable {
+    param([string]$JsonPath)
+
+    if (-not (Test-Path -LiteralPath $JsonPath -PathType Leaf)) { return $null }
+    $raw = Get-Content -LiteralPath $JsonPath -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw | ConvertFrom-Json
+}
+
+function Get-UnattendNamespaceManager {
+    param([xml]$Xml)
+
+    $ns = New-Object System.Xml.XmlNamespaceManager($Xml.NameTable)
+    $ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend') | Out-Null
+    Write-Output -NoEnumerate $ns
+}
+
+function Get-NodeText {
+    param(
+        [xml]$Xml,
+        [System.Xml.XmlNamespaceManager]$NamespaceManager,
+        [string]$XPath
+    )
+
+    $node = $Xml.SelectSingleNode($XPath, $NamespaceManager)
+    if ($node) { return $node.InnerText }
+    return $null
+}
+
+function Test-ExpectedText {
+    param(
+        [xml]$Xml,
+        [System.Xml.XmlNamespaceManager]$NamespaceManager,
+        [string]$Check,
+        [string]$XPath,
+        [string]$Expected
+    )
+
+    $actual = Get-NodeText -Xml $Xml -NamespaceManager $NamespaceManager -XPath $XPath
+    if ($actual -eq $Expected) {
+        Add-ValidationResult -Status Pass -Check $Check -Message "Expected value '$Expected' found."
+    } else {
+        Add-ValidationResult -Status Fail -Check $Check -Message "Expected '$Expected' but found '$actual'." -Data @{ xpath = $XPath; actual = $actual; expected = $Expected }
     }
 }
 
-Get-ChildItem -Path "C:\answer_files\" -Filter "*.xml" -Recurse |
-    Test-Unattend -DllPath "C:\binaries\microsoft.componentstudio.componentplatforminterface.dll" -Verbose
+$resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+$content = Get-Content -LiteralPath $resolvedPath -Raw -ErrorAction Stop
+$isTemplate = [bool]$Template
+$config = Read-JsonHashtable -JsonPath $ConfigPath
+
+Write-Host "Validating: $resolvedPath"
+Write-Host "Mode: $(if ($isTemplate) { 'Template' } else { 'Generated' })"
+
+if ($isTemplate) {
+    if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__') {
+        Add-ValidationResult -Status Pass -Check 'Template password placeholder' -Message 'OSIT password placeholder is present.'
+    } else {
+        Add-ValidationResult -Status Fail -Check 'Template password placeholder' -Message 'Template should contain __OSIT_LOCAL_ADMIN_PASSWORD__.'
+    }
+
+    if ($content -match '__WINDOWS_PE_SETTINGS__') {
+        Add-ValidationResult -Status Pass -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is present for config-driven partitioning.'
+    } else {
+        Add-ValidationResult -Status Warn -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is absent; generated partitioning block cannot be inserted by Initialize-UsbDeployment.ps1.'
+    }
+} else {
+    if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__|__WINDOWS_PE_SETTINGS__') {
+        Add-ValidationResult -Status Fail -Check 'Generated placeholders' -Message 'Generated Autounattend.xml must not contain toolkit placeholders.'
+    } else {
+        Add-ValidationResult -Status Pass -Check 'Generated placeholders' -Message 'No toolkit placeholders found.'
+    }
+}
+
+$validationContent = ConvertTo-ValidationXml -Content $content -IsTemplate:$isTemplate
+$tempValidationFile = Join-Path $env:TEMP ("autounattend-validation-{0}.xml" -f [guid]::NewGuid().ToString('N'))
+Set-Content -LiteralPath $tempValidationFile -Value $validationContent -Encoding UTF8 -Force
+
+try {
+    try {
+        [xml]$xml = $validationContent
+        Add-ValidationResult -Status Pass -Check 'XML well-formed' -Message 'XML parsed successfully after template placeholder normalization.'
+    } catch {
+        Add-ValidationResult -Status Fail -Check 'XML well-formed' -Message $_.Exception.Message
+        throw
+    }
+
+    $ns = Get-UnattendNamespaceManager -Xml $xml
+    $rootName = $xml.DocumentElement.LocalName
+    $rootNs = $xml.DocumentElement.NamespaceURI
+    if ($rootName -eq 'unattend' -and $rootNs -eq 'urn:schemas-microsoft-com:unattend') {
+        Add-ValidationResult -Status Pass -Check 'Root element' -Message 'Root element is unattend with the expected namespace.'
+    } else {
+        Add-ValidationResult -Status Fail -Check 'Root element' -Message "Unexpected root element '$rootName' namespace '$rootNs'."
+    }
+
+    Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'OSIT local account' -XPath '//u:LocalAccount/u:Name' -Expected 'OSIT'
+    Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'OSIT AutoLogon' -XPath '//u:AutoLogon/u:Username' -Expected 'OSIT'
+
+    $localPassword = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:LocalAccount/u:Password/u:Value'
+    $autologonPassword = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:AutoLogon/u:Password/u:Value'
+    if (-not [string]::IsNullOrWhiteSpace($localPassword) -and $localPassword -eq $autologonPassword) {
+        Add-ValidationResult -Status Pass -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values match.'
+    } else {
+        Add-ValidationResult -Status Fail -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values are missing or do not match.'
+    }
+
+    $specializeCommands = @($xml.SelectNodes('//u:settings[@pass="specialize"]//u:RunSynchronousCommand/u:Path', $ns) | ForEach-Object { $_.InnerText })
+    if ($specializeCommands -match 'BypassNRO') {
+        Add-ValidationResult -Status Pass -Check 'BypassNRO' -Message 'BypassNRO registry command is present.'
+    } else {
+        Add-ValidationResult -Status Fail -Check 'BypassNRO' -Message 'BypassNRO registry command was not found in specialize pass.'
+    }
+
+    $firstLogonCommand = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:FirstLogonCommands/u:SynchronousCommand/u:CommandLine'
+    if ($firstLogonCommand -match '1S-WIN11' -and $firstLogonCommand -match 'Start-Deployment\.ps1') {
+        Add-ValidationResult -Status Pass -Check 'FirstLogon deployment command' -Message 'FirstLogon command locates the USB label and starts Start-Deployment.ps1.'
+    } else {
+        Add-ValidationResult -Status Fail -Check 'FirstLogon deployment command' -Message 'FirstLogon command does not contain both USB label 1S-WIN11 and Start-Deployment.ps1.'
+    }
+
+    $windowsPeSettings = @($xml.SelectNodes('//u:settings[@pass="windowsPE"]', $ns))
+    if ($windowsPeSettings.Count -gt 0) {
+        Add-ValidationResult -Status Pass -Check 'windowsPE pass' -Message 'windowsPE pass is present.'
+        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install disk' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:DiskID' -Expected '0'
+        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install partition' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:PartitionID' -Expected '3'
+
+        $runSync = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path'
+        foreach ($fragment in @('clean', 'convert gpt', 'create partition efi size=512', 'create partition msr size=16', 'shrink desired=2048 minimum=2048', 'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"', 'gpt attributes=0x8000000000000001')) {
+            if ($runSync -match [regex]::Escape($fragment)) {
+                Add-ValidationResult -Status Pass -Check "Partition command: $fragment" -Message 'Expected partition command fragment found.'
+            } else {
+                Add-ValidationResult -Status Fail -Check "Partition command: $fragment" -Message 'Expected partition command fragment missing.'
+            }
+        }
+    } elseif ($config -and $config.wipe_repartition_drive -eq $true -and -not $isTemplate) {
+        Add-ValidationResult -Status Fail -Check 'windowsPE pass' -Message 'Config expects wipe_repartition_drive=true, but generated XML has no windowsPE pass.'
+    } else {
+        Add-ValidationResult -Status Warn -Check 'windowsPE pass' -Message 'windowsPE pass is absent. This is expected for the repository template or technician-led disk selection.'
+    }
+
+    if (-not $DllPath) { $DllPath = Find-UnattendSchemaDll }
+    if ($DllPath -and (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
+        try {
+            $schemaText = Get-Schema -Path (Resolve-Path -LiteralPath $DllPath).Path
+            $schemaErrors = @(Test-XmlSchema -XmlPath $tempValidationFile -SchemaText $schemaText)
+            if ($schemaErrors.Count -eq 0) {
+                Add-ValidationResult -Status Pass -Check 'ADK schema validation' -Message "Schema validation passed using $DllPath."
+            } else {
+                foreach ($schemaError in $schemaErrors) {
+                    Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $schemaError
+                }
+            }
+        } catch {
+            Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $_.Exception.Message
+        }
+    } elseif ($RequireSchema) {
+        Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message 'Schema DLL was not found and -RequireSchema was specified.'
+    } else {
+        Add-ValidationResult -Status Warn -Check 'ADK schema validation' -Message 'Schema DLL not found. Install Windows ADK or pass -DllPath for full schema validation.'
+    }
+} finally {
+    Remove-Item -LiteralPath $tempValidationFile -Force -ErrorAction SilentlyContinue
+}
+
+$failures = @($script:ValidationResults | Where-Object { $_.status -eq 'Fail' })
+Write-Host ''
+Write-Host ("Validation complete: {0} pass, {1} warning, {2} failure" -f `
+        @($script:ValidationResults | Where-Object { $_.status -eq 'Pass' }).Count, `
+        @($script:ValidationResults | Where-Object { $_.status -eq 'Warn' }).Count, `
+        $failures.Count)
+
+if ($failures.Count -gt 0) {
+    exit 1
+}
+
+exit 0

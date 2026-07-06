@@ -236,6 +236,20 @@ The generated file:
 
 Treat `wipe_repartition_drive=true` as destructive. It is intended for standardised deployments where disk 0 is the target OS disk.
 
+Validate the repository template:
+
+```powershell
+.\Validate-Unattend.ps1
+```
+
+Validate a generated USB-root answer file:
+
+```powershell
+.\Validate-Unattend.ps1 -Path E:\Autounattend.xml -Generated -ConfigPath E:\Deployment\Config\deployment_config.json
+```
+
+For full Microsoft schema validation, install the Windows ADK or pass `-DllPath` pointing to `Microsoft.ComponentStudio.ComponentPlatformInterface.dll`. Without that DLL, the validator still performs XML and toolkit-specific semantic checks.
+
 ## Driver Folders
 
 Drivers must be stored as:
