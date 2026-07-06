@@ -9,26 +9,6 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\Common.ps1"
 
-function Get-DeploymentSteps {
-    @(
-        'NetworkDrivers',
-        'MspWifiSetup',
-        'Preflight',
-        'ConfigureComputerName',
-        'CreateLocalAdmin',
-        'PowerSettings',
-        'WindowsUpdates',
-        'AssetInventory',
-        'ModelDrivers',
-        'WingetApps',
-        'DattoRmm',
-        'LocalApps',
-        'DesktopItems',
-        'FinalReport',
-        'Complete'
-    )
-}
-
 function Initialize-StateForRun {
     param(
         [string]$StatePath,
@@ -104,6 +84,7 @@ function Invoke-ComputerNameStep {
                     Write-Log -Level Warn -Message 'computer_name_mode=prompt but the session is non-interactive; keeping the current computer name.'
                     return
                 }
+                Show-DeploymentToast -Title 'Windows 11 Deployment - Action Needed' -Message "Enter a computer name for $env:COMPUTERNAME to continue."
                 do {
                     $inputName = Read-Host 'Enter desired computer name, or press Enter to keep current name'
                     if ([string]::IsNullOrWhiteSpace($inputName)) {
@@ -383,9 +364,17 @@ function Invoke-DeploymentStep {
                 }
             }
             Write-Log -Level Success -Message 'Deployment task sequence complete. Device is ready for domain join / Entra join / customer onboarding.'
+            Show-DeploymentToast -Title 'Windows 11 Deployment Complete' -Message "$env:COMPUTERNAME is ready for customer onboarding."
         }
         default { throw "Unknown deployment step '$Step'." }
     }
+}
+
+$runLock = Enter-DeploymentRunLock
+if (-not $runLock.Acquired) {
+    Write-Host 'Another deployment instance is already running on this device (resume task overlap or a manual re-run). Exiting without changing state.' -ForegroundColor Yellow
+    Exit-DeploymentRunLock -Lock $runLock
+    exit 0
 }
 
 $paths = $null
@@ -397,6 +386,10 @@ try {
     Initialize-DeploymentLogging -UsbRoot $UsbRoot -State $state | Out-Null
     $config = Get-DeploymentConfig -UsbRoot $UsbRoot
     $steps = Get-DeploymentSteps
+
+    $startMessage = if (@($state.completed_steps).Count -gt 0) { "Resuming from last successful step: $($state.last_successful_step)" } else { 'Deployment started' }
+    Write-Log -Level Info -Message $startMessage
+    Show-DeploymentToast -Title 'Windows 11 Deployment' -Message "$startMessage on $env:COMPUTERNAME."
 
     foreach ($step in $steps) {
         $state = Read-DeploymentState -StatePath $paths.StateFile
@@ -424,6 +417,7 @@ try {
 } catch {
     $message = $_.Exception.Message
     Write-Log -Level Error -Message "Deployment failed: $message"
+    Show-DeploymentToast -Title 'Windows 11 Deployment - Stopped' -Message "Deployment failed on $env:COMPUTERNAME`: $message"
     try {
         if ($paths -and (Test-Path -LiteralPath $paths.StateFile -PathType Leaf)) {
             $failedState = Read-DeploymentState -StatePath $paths.StateFile
@@ -441,4 +435,5 @@ try {
     exit 1
 } finally {
     Stop-DeploymentLogging
+    Exit-DeploymentRunLock -Lock $runLock
 }

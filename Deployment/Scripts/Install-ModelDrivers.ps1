@@ -59,6 +59,7 @@ if ($NonInteractive) {
     return
 }
 
+Show-DeploymentToast -Title 'Windows 11 Deployment - Action Needed' -Message "Model driver folder created for $manufacturer\$model. Copy drivers or choose to continue."
 Write-Host 'A) Recheck the newly created folder now for drivers to install'
 Write-Host 'B) Continue without installing additional offline drivers'
 

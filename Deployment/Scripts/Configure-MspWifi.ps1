@@ -119,14 +119,30 @@ $encryption = [string]$wifi.encryption
 $timeout = [int]$wifi.connect_timeout_seconds
 if ($timeout -lt 10) { $timeout = 10 }
 
-$profileName = $ssid
-$profileXml = @"
+function Remove-MspWifiProfile {
+    param([string]$Ssid)
+    # Deletes any existing profile for this SSID first. A stale profile from an earlier run
+    # (or one with a mismatched authentication type) makes Windows treat the network as
+    # "settings changed" and silently refuse to connect, forcing an interactive re-entry.
+    Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'delete', 'profile', "name=$Ssid") -AllowedExitCodes @(0, 1) -LogName 'msp-wifi-delete-profile.log' | Out-Null
+}
+
+function Connect-MspWifiProfile {
+    param(
+        [string]$Ssid,
+        [string]$Authentication,
+        [string]$Encryption,
+        [string]$Password,
+        [int]$TimeoutSeconds
+    )
+
+    $profileXml = @"
 <?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-  <name>$(ConvertTo-WlanXmlText $profileName)</name>
+  <name>$(ConvertTo-WlanXmlText $Ssid)</name>
   <SSIDConfig>
     <SSID>
-      <name>$(ConvertTo-WlanXmlText $ssid)</name>
+      <name>$(ConvertTo-WlanXmlText $Ssid)</name>
     </SSID>
   </SSIDConfig>
   <connectionType>ESS</connectionType>
@@ -134,36 +150,59 @@ $profileXml = @"
   <MSM>
     <security>
       <authEncryption>
-        <authentication>$(ConvertTo-WlanXmlText $authentication)</authentication>
-        <encryption>$(ConvertTo-WlanXmlText $encryption)</encryption>
+        <authentication>$(ConvertTo-WlanXmlText $Authentication)</authentication>
+        <encryption>$(ConvertTo-WlanXmlText $Encryption)</encryption>
         <useOneX>false</useOneX>
       </authEncryption>
       <sharedKey>
         <keyType>passPhrase</keyType>
         <protected>false</protected>
-        <keyMaterial>$(ConvertTo-WlanXmlText $wifiPassword)</keyMaterial>
+        <keyMaterial>$(ConvertTo-WlanXmlText $Password)</keyMaterial>
       </sharedKey>
     </security>
   </MSM>
 </WLANProfile>
 "@
 
-$profilePath = Join-Path $env:TEMP ("OSIT-WiFi-{0}.xml" -f (Get-SafeName -Value $ssid))
-try {
-    Set-Content -LiteralPath $profilePath -Value $profileXml -Encoding UTF8 -Force -ErrorAction Stop
-    Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'add', 'profile', "filename=$profilePath", 'user=all') -LogName 'msp-wifi-add-profile.log' | Out-Null
-    Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'connect', "name=$ssid", "ssid=$ssid") -AllowedExitCodes @(0, 1) -LogName 'msp-wifi-connect.log' | Out-Null
-} finally {
-    Remove-Item -LiteralPath $profilePath -Force -ErrorAction SilentlyContinue
+    $profilePath = Join-Path $env:TEMP ("OSIT-WiFi-{0}.xml" -f (Get-SafeName -Value $Ssid))
+    try {
+        Remove-MspWifiProfile -Ssid $Ssid
+        Set-Content -LiteralPath $profilePath -Value $profileXml -Encoding UTF8 -Force -ErrorAction Stop
+        Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'add', 'profile', "filename=$profilePath", 'user=all') -LogName 'msp-wifi-add-profile.log' | Out-Null
+        Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'connect', "name=$Ssid", "ssid=$Ssid") -AllowedExitCodes @(0, 1) -LogName 'msp-wifi-connect.log' | Out-Null
+    } finally {
+        Remove-Item -LiteralPath $profilePath -Force -ErrorAction SilentlyContinue
+    }
+
+    return (Wait-WifiConnection -Ssid $Ssid -TimeoutSeconds $TimeoutSeconds)
 }
 
-if (-not (Wait-WifiConnection -Ssid $ssid -TimeoutSeconds $timeout)) {
-    throw "Timed out waiting for WiFi SSID '$ssid' to connect."
+$connected = Connect-MspWifiProfile -Ssid $ssid -Authentication $authentication -Encryption $encryption -Password $wifiPassword -TimeoutSeconds $timeout
+$usedAuthentication = $authentication
+
+# WPA2-Personal is accepted by pure-WPA2 access points and by WPA2/WPA3-transition
+# (mixed) access points alike, so it is a safe universal fallback when the configured
+# authentication type does not match what the access point actually negotiates.
+if (-not $connected -and $authentication -ne 'WPA2PSK') {
+    Write-Log -Level Warn -Message "Could not connect to '$ssid' using $authentication/$encryption within $timeout second(s). Retrying with WPA2PSK/AES."
+    $connected = Connect-MspWifiProfile -Ssid $ssid -Authentication 'WPA2PSK' -Encryption 'AES' -Password $wifiPassword -TimeoutSeconds $timeout
+    if ($connected) {
+        $usedAuthentication = 'WPA2PSK'
+        Write-Log -Level Warn -Message "Connected using WPA2PSK fallback instead of configured '$authentication'. Update msp_wifi_setup.authentication in deployment_config.json to WPA2PSK to avoid this delay on future deployments."
+    }
+}
+
+if (-not $connected) {
+    # Leaving a mismatched profile behind would make the next manual connection attempt
+    # fail with the same "network settings have changed" prompt until it is removed.
+    Remove-MspWifiProfile -Ssid $ssid
+    throw "Timed out waiting for WiFi SSID '$ssid' to connect using both '$authentication' and the WPA2PSK fallback. Verify the access point's actual security mode and OSIT_WIFI_PASSWORD."
 }
 
 $result = [ordered]@{
     ssid = $ssid
     status = 'Connected'
+    authentication = $usedAuthentication
     timestamp = (Get-Date).ToString('o')
 }
 if ($state) {
@@ -172,4 +211,4 @@ if ($state) {
 }
 
 Write-StructuredLog -Level Info -Message 'MSP WiFi setup completed' -Data $result
-Write-Log -Level Success -Message "Connected to MSP WiFi SSID '$ssid'."
+Write-Log -Level Success -Message "Connected to MSP WiFi SSID '$ssid' using $usedAuthentication."

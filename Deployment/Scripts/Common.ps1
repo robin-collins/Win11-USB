@@ -5,7 +5,28 @@ Set-StrictMode -Version 2.0
 
 $script:DeploymentVolumeLabel = '1S-WIN11'
 $script:DeploymentTaskName = 'OneSolutionWin11DeploymentResume'
+$script:DeploymentRunMutexName = 'Global\OneSolutionWin11Deployment'
 $script:DeploymentLogContext = $null
+
+function Get-DeploymentSteps {
+    @(
+        'NetworkDrivers',
+        'MspWifiSetup',
+        'Preflight',
+        'ConfigureComputerName',
+        'CreateLocalAdmin',
+        'PowerSettings',
+        'WindowsUpdates',
+        'AssetInventory',
+        'ModelDrivers',
+        'WingetApps',
+        'DattoRmm',
+        'LocalApps',
+        'DesktopItems',
+        'FinalReport',
+        'Complete'
+    )
+}
 
 function ConvertTo-PlainHashtable {
     param([Parameter(ValueFromPipeline = $true)][object]$InputObject)
@@ -806,9 +827,24 @@ function Test-PendingReboot {
     return $false
 }
 
+function Get-LocalAccountSid {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Username)
+
+    try {
+        $account = New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $Username)
+        return $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        return $null
+    }
+}
+
 function Register-DeploymentResumeTask {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$UsbRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$UsbRoot,
+        [string]$TriggerUsername
+    )
 
     $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
     $resumeScript = Join-Path $paths.Scripts 'Resume-Deployment.ps1'
@@ -816,12 +852,27 @@ function Register-DeploymentResumeTask {
         throw "Resume script missing: $resumeScript"
     }
 
-    $userId = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+    if ([string]::IsNullOrWhiteSpace($TriggerUsername)) { $TriggerUsername = $env:USERNAME }
+
+    # A logon trigger built from "COMPUTERNAME\User" resolves to a SID at registration time,
+    # but ConfigureComputerName's own reboot can rename the computer at the same reboot this
+    # task is meant to survive. Resolving the SID explicitly here removes any dependency on
+    # the computer name at all, so the trigger keeps matching the account after a rename.
+    $userSid = Get-LocalAccountSid -Username $TriggerUsername
+    $userId = if ($userSid) { $userSid } else { "$env:COMPUTERNAME\$TriggerUsername" }
+
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $resumeScript)
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+
+    # The AtLogOn trigger is the primary path (fires immediately once someone is logged on).
+    # The recurring trigger is a backstop so the deployment resumes within a few minutes even
+    # if automatic logon does not occur for some reason and no technician is present to log
+    # on manually, instead of waiting indefinitely for a fresh logon event.
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $backstopTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3)
+
     $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
-    Register-ScheduledTask -TaskName $script:DeploymentTaskName -Action $action -Trigger $trigger -Principal $principal -Force -ErrorAction Stop | Out-Null
-    Write-Log -Level Success -Message "Resume scheduled task is registered: $script:DeploymentTaskName"
+    Register-ScheduledTask -TaskName $script:DeploymentTaskName -Action $action -Trigger @($logonTrigger, $backstopTrigger) -Principal $principal -Force -ErrorAction Stop | Out-Null
+    Write-Log -Level Success -Message "Resume scheduled task is registered for '$TriggerUsername': $script:DeploymentTaskName (logon trigger plus a 5-minute backstop check)"
 }
 
 function Unregister-DeploymentResumeTask {
@@ -838,6 +889,115 @@ function Unregister-DeploymentResumeTask {
     }
 }
 
+function Enable-DeploymentAutoLogon {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$UsbRoot)
+
+    # Autounattend's AutoLogon only fires once (LogonCount=1), covering the very first boot
+    # after Windows install. Every later deployment-triggered reboot (rename, Windows Update)
+    # would otherwise sit at the lock screen until a technician physically logs back on as
+    # OSIT before the resume task's logon trigger can fire. Re-enabling autologon here for
+    # just the next boot keeps the resume genuinely unattended. This is scrubbed again in the
+    # Complete step, matching the same plaintext-password handling Autounattend.xml already
+    # documents and accepts for the first boot.
+    $config = Get-DeploymentConfig -UsbRoot $UsbRoot
+    $username = [string]$config.osit_local_admin_username
+    if ([string]::IsNullOrWhiteSpace($username)) { $username = 'OSIT' }
+
+    $password = Get-OsitLocalAdminPassword -SearchRoots @($UsbRoot)
+    if ([string]::IsNullOrWhiteSpace($password)) {
+        Write-Log -Level Warn -Message "OSIT password was not found; cannot enable automatic logon for the next reboot. A technician must log on as $username manually to resume."
+        return $null
+    }
+
+    try {
+        $winlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        Set-ItemProperty -LiteralPath $winlogonKey -Name AutoAdminLogon -Value '1' -Type String -Force -ErrorAction Stop
+        Set-ItemProperty -LiteralPath $winlogonKey -Name DefaultUserName -Value $username -Type String -Force -ErrorAction Stop
+        Set-ItemProperty -LiteralPath $winlogonKey -Name DefaultPassword -Value $password -Type String -Force -ErrorAction Stop
+        Remove-ItemProperty -LiteralPath $winlogonKey -Name DefaultDomainName -ErrorAction SilentlyContinue
+        Write-Log -Level Info -Message "Automatic logon for '$username' is enabled for the next reboot so the deployment resumes without technician intervention."
+        return $username
+    } catch {
+        Write-Log -Level Warn -Message "Could not enable automatic logon: $($_.Exception.Message). A technician must log on manually to resume."
+        return $null
+    }
+}
+
+function Show-DeploymentToast {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+
+    # Best-effort only: toasts are a convenience for the technician, not a deployment
+    # requirement. A missing WinRT type (non-interactive/SYSTEM session, older PowerShell)
+    # must never fail or slow down the actual deployment.
+    try {
+        [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
+        [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime]
+
+        $escapedTitle = [System.Security.SecurityElement]::Escape($Title)
+        $escapedMessage = [System.Security.SecurityElement]::Escape($Message)
+        $template = "<toast><visual><binding template=`"ToastGeneric`"><text>$escapedTitle</text><text>$escapedMessage</text></binding></visual></toast>"
+
+        $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+        $xml.LoadXml($template)
+        $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+        $appId = (Get-Process -Id $PID -ErrorAction Stop).Path
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
+    } catch {
+        Write-Log -Level Debug -Message "Toast notification could not be shown (non-fatal): $($_.Exception.Message)"
+    }
+}
+
+function Get-DeploymentProcessInfo {
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Named $matchingProcesses deliberately: a variable named $matches collides with the
+        # automatic $Matches populated by the -match operator used in this same filter, which
+        # silently corrupts the assignment.
+        $matchingProcesses = Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
+            $_.Name -ieq 'powershell.exe' -and $_.CommandLine -and
+            ($_.CommandLine -match 'Start-Deployment\.ps1' -or $_.CommandLine -match 'Resume-Deployment\.ps1') -and
+            $_.ProcessId -ne $PID
+        }
+        return @($matchingProcesses | Select-Object ProcessId, CommandLine, CreationDate)
+    } catch {
+        return @()
+    }
+}
+
+function Enter-DeploymentRunLock {
+    [CmdletBinding()]
+    param()
+
+    $mutex = New-Object System.Threading.Mutex($false, $script:DeploymentRunMutexName)
+    $acquired = $false
+    try {
+        $acquired = $mutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+        # A previous run crashed or was killed without releasing the mutex; the deployment
+        # state file (not the mutex) is the source of truth for progress, so it is safe to
+        # take over rather than treat this as "already running".
+        $acquired = $true
+    }
+    return [ordered]@{ Mutex = $mutex; Acquired = $acquired }
+}
+
+function Exit-DeploymentRunLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Lock)
+
+    if ($Lock.Acquired) {
+        try { $Lock.Mutex.ReleaseMutex() | Out-Null } catch {}
+    }
+    $Lock.Mutex.Dispose()
+}
+
 function Request-DeploymentReboot {
     [CmdletBinding()]
     param(
@@ -850,9 +1010,11 @@ function Request-DeploymentReboot {
     $State.reboot_pending = $true
     Add-StateHistory -State $State -Event 'reboot_requested' -Data @{ reason = $Reason; current_step = $State.current_step }
     Write-DeploymentState -State $State -StatePath $StatePath
-    Register-DeploymentResumeTask -UsbRoot $UsbRoot
+    $autoLogonUser = Enable-DeploymentAutoLogon -UsbRoot $UsbRoot
+    Register-DeploymentResumeTask -UsbRoot $UsbRoot -TriggerUsername $autoLogonUser
     Write-Log -Level Warn -Message "Reboot required: $Reason"
     Write-Log -Level Info -Message 'The deployment will resume after the next administrator logon.'
+    Show-DeploymentToast -Title 'Windows 11 Deployment' -Message "Restarting to continue: $Reason. Will resume automatically after logon."
     Restart-Computer -Force
     exit 3010
 }

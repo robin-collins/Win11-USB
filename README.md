@@ -406,7 +406,16 @@ Each run writes:
 
 ## Resume And Reboot Handling
 
-The toolkit registers a scheduled task named `OneSolutionWin11DeploymentResume` when a reboot is required. Repeated runs use the same task name and replace it rather than creating duplicates.
+The toolkit registers a scheduled task named `OneSolutionWin11DeploymentResume` when a reboot is required. Repeated runs use the same task name and replace it rather than creating duplicates. The task has two triggers:
+
+- an at-logon trigger, which fires as soon as the account is logged on.
+- a 5-minute recurring backstop trigger, so the deployment still resumes promptly even if the logon trigger does not fire for some reason (for example, a session restore path that does not generate a fresh logon event).
+
+Both triggers are bound to the account by SID rather than by `ComputerName\Username`, so the task keeps matching the account even if the same reboot also renames the computer (a common first reboot, since `ConfigureComputerName` runs early).
+
+To keep resumes genuinely unattended across every deployment-triggered reboot (not just the very first one after Windows install), the toolkit temporarily re-enables Windows automatic logon for the OSIT account before each such reboot, using the same `Winlogon` mechanism `Autounattend.xml` already uses for the first boot. This is scrubbed again in the `Complete` step along with the rest of the autologon values, so the device does not retain automatic logon or a plaintext password once deployment finishes. If the OSIT password cannot be found at reboot time, automatic logon is skipped and a technician must log on manually to resume, as before.
+
+If two triggers happen to fire close together (or a technician manually reruns the script while a triggered resume is already active), `Start-Deployment.ps1` takes an exclusive lock for the duration of the run; a second instance detects this and exits immediately without touching `deployment_state.json`, rather than racing the first instance.
 
 On rerun, the script:
 
@@ -427,6 +436,29 @@ To force a new run:
 ```powershell
 .\Deployment\Scripts\Start-Deployment.ps1 -Reset
 ```
+
+### Checking Deployment Status
+
+To check whether a deployment is currently running, waiting for a reboot, stalled, failed, or complete, from an elevated PowerShell prompt on the device (or a technician session on it):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deployment\Scripts\Get-DeploymentStatus.ps1
+```
+
+This reports the overall status, current and last-completed step, progress out of the total step count, how long ago the state file and logs were last updated, whether a matching `Start-Deployment.ps1`/`Resume-Deployment.ps1` process is currently running, and the resume scheduled task's registration state. Add `-Json` for machine-readable output, or `-RefreshSeconds 15` to keep the report refreshing in place instead of a one-shot check.
+
+Overall status values:
+
+- `NotStarted` — no state file yet.
+- `Running` — a matching deployment process is currently active.
+- `Failed` — a recorded error exists and nothing is currently running.
+- `WaitingForReboot` — the deployment itself requested a reboot and is waiting to resume.
+- `Completed` — the `Complete` step has run.
+- `Stalled` — state exists but none of the above explain it, which usually means the process was killed or crashed without recording a failure.
+
+### Toast Notifications
+
+Key deployment moments show a Windows toast notification to the interactively logged-on technician session: deployment start/resume, a reboot being requested, technician action needed (computer name prompt, missing model driver folder), deployment failure, and final completion. Toasts are best-effort only — if they cannot be shown (for example a non-interactive session), the deployment continues normally and this is logged at Debug level, never treated as a failure. The console output from `Write-Log` remains the authoritative, always-available record.
 
 ## Workflow
 
