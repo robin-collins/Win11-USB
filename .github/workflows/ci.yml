@@ -94,5 +94,5 @@ jobs:
         env:
           # CI-only dummy value -- never a real secret. -Ci never prompts, so
           # OSIT_LOCAL_ADMIN_PASSWORD must be present in the environment before it runs.
-          OSIT_LOCAL_ADMIN_PASSWORD: 'CI-Only-Dummy-Passw0rd!'
+          OSIT_LOCAL_ADMIN_PASSWORD: 'not-a-real-secret-ci-placeholder-value'
         run: pwsh -File Validate-Unattend.ps1 -Ci
