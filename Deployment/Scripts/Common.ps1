@@ -317,7 +317,7 @@ function Get-SafeName {
     return $name
 }
 
-function Normalize-Manufacturer {
+function ConvertTo-NormalizedManufacturer {
     [CmdletBinding()]
     param([AllowEmptyString()][string]$Manufacturer)
 
@@ -330,7 +330,7 @@ function Normalize-Manufacturer {
     }
 }
 
-function Normalize-Model {
+function ConvertTo-NormalizedModel {
     [CmdletBinding()]
     param(
         [AllowEmptyString()][string]$Model,

@@ -285,8 +285,8 @@ function Test-XmlSchema {
 
     $validationErrors = New-Object 'System.Collections.Generic.List[string]'
     $handler = [System.Xml.Schema.ValidationEventHandler]{
-        param($sender, $eventArgs)
-        $validationErrors.Add($eventArgs.Exception.Message) | Out-Null
+        param($schemaEventSender, $schemaValidationEventArgs)
+        $validationErrors.Add($schemaValidationEventArgs.Exception.Message) | Out-Null
     }
 
     $schemaReader = New-Object System.IO.StringReader($SchemaText)

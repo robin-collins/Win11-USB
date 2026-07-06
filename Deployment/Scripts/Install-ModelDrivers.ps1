@@ -16,8 +16,8 @@ $state = Read-DeploymentState -StatePath $StatePath
 if (-not $state) { throw "Deployment state not found at $StatePath" }
 
 $system = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-$manufacturer = Normalize-Manufacturer -Manufacturer $system.Manufacturer
-$model = Normalize-Model -Model $system.Model -Manufacturer $manufacturer
+$manufacturer = ConvertTo-NormalizedManufacturer -Manufacturer $system.Manufacturer
+$model = ConvertTo-NormalizedModel -Model $system.Model -Manufacturer $manufacturer
 $driverFolder = Join-Path (Join-Path $paths.Drivers $manufacturer) $model
 
 $state.manufacturer = $system.Manufacturer
