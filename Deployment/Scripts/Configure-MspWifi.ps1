@@ -119,6 +119,40 @@ $encryption = [string]$wifi.encryption
 $timeout = [int]$wifi.connect_timeout_seconds
 if ($timeout -lt 10) { $timeout = 10 }
 
+# Dry-run invariant (FABLE_TASKS.md T07a): config validity, password presence, existing
+# connectivity, and wireless-adapter detection above all ran for real -- that is the genuine
+# value of a dry run for this step. But actually adding/connecting a WLAN profile is a real
+# machine mutation, and simply letting it fall through to Invoke-ExternalCommand's generic
+# dry-run refusal (T05) is not enough on its own here: the polling loop below
+# (Wait-WifiConnection) would still spin for up to $timeout seconds waiting for a connection
+# that a synthesized "success" never actually establishes, then treat that as a real failure,
+# retry the WPA2PSK fallback, spin again, and finally throw -- turning a dry run into a false
+# failure. So the whole connect-and-wait sequence is skipped outright and replaced with a
+# single logged action, and `netsh wlan add/connect` is never invoked at all in dry-run.
+if (Test-DeploymentDryRun) {
+    Write-DryRunAction -State $state -Step 'MspWifiSetup' -Action "would create WLAN profile '$ssid' (authentication=$authentication, encryption=$encryption) and connect (timeout ${timeout}s)" -Data ([ordered]@{
+            ssid                    = $ssid
+            authentication          = $authentication
+            encryption              = $encryption
+            connect_timeout_seconds = $timeout
+        })
+
+    $dryRunResult = [ordered]@{
+        ssid           = $ssid
+        status         = 'DryRun'
+        authentication = $authentication
+        timestamp      = (Get-Date).ToString('o')
+    }
+    if ($state) {
+        $state.msp_wifi_setup = $dryRunResult
+        Write-DeploymentState -State $state -StatePath $StatePath
+    }
+
+    Write-StructuredLog -Level Info -Message 'MSP WiFi setup dry run completed' -Data $dryRunResult
+    Write-Log -Level Success -Message "Dry run: would connect to MSP WiFi SSID '$ssid' using $authentication/$encryption. No WLAN profile was added or changed."
+    return
+}
+
 function Remove-MspWifiProfile {
     param([string]$Ssid)
     # Deletes any existing profile for this SSID first. A stale profile from an earlier run

@@ -13,6 +13,33 @@ if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Get-UsbRoot }
 $paths = Initialize-DeploymentDirectories -UsbRoot $UsbRoot
 $config = Get-DeploymentConfig -UsbRoot $UsbRoot
 
+function Get-EffectivePreflightStatus {
+    <#
+        Pure decision function (FABLE_TASKS.md T07a): a dry run keeps every preflight check
+        running for real -- that is the whole value of preflight in dry-run mode -- but a hard
+        Fail on a check that is just a bench-PC environment reality (not elevated at the
+        keyboard, no internet on this particular bench, no AC power / no battery info on a
+        test rig) must not stop the dry run the way a genuine configuration defect should
+        (missing/invalid deployment_config.json, Windows Home edition when Home is disallowed,
+        a missing required script/folder, etc.). Only Fail results for the three named checks
+        are downgraded, and only while Test-DeploymentDryRun is true; every other Fail (and
+        every Warn/Pass) passes through unchanged, including in production.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('Pass', 'Warn', 'Fail')][string]$Status,
+        [bool]$DryRun
+    )
+
+    $environmentDependentCheckNames = @('Administrator', 'Internet', 'AC Power')
+    if ($DryRun -and $Status -eq 'Fail' -and ($environmentDependentCheckNames -contains $Name)) {
+        return 'Warn'
+    }
+    return $Status
+}
+
 function Add-PreflightResult {
     param(
         [System.Collections.Generic.List[object]]$Results,
@@ -21,15 +48,22 @@ function Add-PreflightResult {
         [string]$Message,
         [object]$Data
     )
+
+    $effectiveStatus = Get-EffectivePreflightStatus -Name $Name -Status $Status -DryRun (Test-DeploymentDryRun)
+    if ($effectiveStatus -ne $Status) {
+        $Message = "$Message (dry run: downgraded from Fail to Warn -- this is a bench-PC environment condition, not a configuration defect)"
+        Write-DryRunAction -State $null -Step 'Preflight' -Action "downgraded '$Name' from Fail to Warn for dry run" -Data ([ordered]@{ name = $Name; original_status = $Status })
+    }
+
     $Results.Add([ordered]@{
             name    = $Name
-            status  = $Status
+            status  = $effectiveStatus
             message = $Message
             data    = $Data
         }) | Out-Null
-    if ($Status -eq 'Pass') {
+    if ($effectiveStatus -eq 'Pass') {
         Write-Log -Level Success -Message "${Name}: $Message"
-    } elseif ($Status -eq 'Warn') {
+    } elseif ($effectiveStatus -eq 'Warn') {
         Write-Log -Level Warn -Message "${Name}: $Message"
     } else {
         Write-Log -Level Error -Message "${Name}: $Message"

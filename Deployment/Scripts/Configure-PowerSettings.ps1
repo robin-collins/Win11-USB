@@ -42,6 +42,27 @@ $results = @()
 foreach ($command in $commands) {
     $setting = [string]$command[0]
     $minutes = [string]$command[1]
+
+    if (Test-DeploymentDryRun) {
+        # Explicit dry-run branch rather than relying only on Invoke-ExternalCommand's generic
+        # refusal (Common.ps1, T05): this labels the audit trail entry with the real step name
+        # ('PowerSettings' instead of the generic 'ExternalCommand' default) so it aggregates
+        # correctly into state.dryrun_actions for the T08 summary report, and reuses
+        # ConvertTo-ProcessArgumentString so the logged command line is formatted exactly the
+        # way Invoke-ExternalCommand itself would format and log a real invocation.
+        $argumentString = ConvertTo-ProcessArgumentString -Arguments @('/change', $setting, $minutes)
+        Write-DryRunAction -State $state -Step 'PowerSettings' -Action "would run: powercfg.exe $argumentString" -Data ([ordered]@{
+                file_path = 'powercfg.exe'
+                arguments = @('/change', $setting, $minutes)
+            })
+        $results += ,([ordered]@{
+                setting   = $setting
+                minutes   = [int]$minutes
+                exit_code = 0
+            })
+        continue
+    }
+
     $result = Invoke-ExternalCommand -FilePath powercfg.exe -Arguments @('/change', $setting, $minutes) -LogName ("powercfg-{0}.log" -f $setting)
     $results += ,([ordered]@{
             setting = $setting
@@ -50,7 +71,10 @@ foreach ($command in $commands) {
         })
 }
 
-$scheme = Invoke-ExternalCommand -FilePath powercfg.exe -Arguments @('/getactivescheme') -LogName 'powercfg-active-scheme.log'
+# /getactivescheme only queries the currently active power plan; it changes nothing, so
+# -ReadOnly keeps it running for real even in dry-run (Common.ps1, T05) and the summary below
+# reports the machine's genuine active scheme instead of a synthesized blank value.
+$scheme = Invoke-ExternalCommand -FilePath powercfg.exe -Arguments @('/getactivescheme') -LogName 'powercfg-active-scheme.log' -ReadOnly
 $summary = [ordered]@{
     battery_minutes = $batteryMinutes
     ac_minutes = $acMinutes
