@@ -47,6 +47,7 @@
   "datto_rmm_required": true,
   "install_local_apps": false,
   "install_offline_drivers": true,
+  "install_network_drivers": true,
   "stop_before_domain_join": true,
   "fail_on_missing_required_app": true,
   "fail_on_windows_home": true,

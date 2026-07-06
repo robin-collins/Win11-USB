@@ -139,7 +139,7 @@ If `PSWindowsUpdate` cannot be used, the script falls back to Windows Update COM
 | Key | Type | Example | Meaning |
 | --- | --- | --- | --- |
 | `install_winget_apps` | boolean | `true` | Enables `winget_packages.json` installation. |
-| `winget_bootstrap` | boolean | `false` | Reserved bootstrap switch for winget/App Installer availability. Preflight currently fails if winget is required but absent and bootstrap is disabled. |
+| `winget_bootstrap` | boolean | `false` | If `true` and winget is not yet available at first logon, re-registers App Installer and falls back to `Repair-WinGetPackageManager` before installing apps. If `false` (or bootstrap fails), preflight/install fails when winget is required but absent. |
 | `install_local_apps` | boolean | `true` | Enables `local_apps.json` installation from `Deployment\Apps\Local`. |
 | `fail_on_missing_required_app` | boolean | `true` | Required app failures stop the task sequence. |
 
@@ -157,5 +157,6 @@ Datto installs after hostname, Windows Updates, model drivers, and winget apps, 
 
 | Key | Type | Example | Meaning |
 | --- | --- | --- | --- |
-| `install_offline_drivers` | boolean | `true` | Enables model-specific driver install from `Deployment\Drivers\<Manufacturer>\<Model>`. |
+| `install_offline_drivers` | boolean | `true` | Enables model-specific driver install from `Deployment\Drivers\<Manufacturer>\<Model>`, run after Windows Updates. |
+| `install_network_drivers` | boolean | `true` | Enables the `NetworkDrivers` step, which runs first (before MSP WiFi setup and preflight) and installs every vendor folder under `Deployment\Drivers\Network\<Vendor>` (for example `Intel`, `Realtek`, `Qualcomm`). Use this to carry WiFi/NIC drivers for chips a bare Windows image does not have inbox drivers for, so the machine can reach the network before Preflight's internet check runs. Any subfolder name is tried; unrelated vendor packages are skipped harmlessly by pnputil rather than erroring. |
 | `stop_before_domain_join` | boolean | `true` | Documents the intentional stop point. The toolkit does not domain join, Entra join, or customer identity join. |

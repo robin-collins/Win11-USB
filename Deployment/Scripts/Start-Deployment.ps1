@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 
 function Get-DeploymentSteps {
     @(
+        'NetworkDrivers',
         'MspWifiSetup',
         'Preflight',
         'ConfigureComputerName',
@@ -322,6 +323,10 @@ function Invoke-DeploymentStep {
     )
 
     switch ($Step) {
+        'NetworkDrivers' {
+            if ([bool]$Config.install_network_drivers) { & (Join-Path $PSScriptRoot 'Install-NetworkDrivers.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
+            else { Write-Log -Level Info -Message 'Network driver installation is disabled by config.' }
+        }
         'MspWifiSetup' { & (Join-Path $PSScriptRoot 'Configure-MspWifi.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'Preflight' { & (Join-Path $PSScriptRoot 'Invoke-PreflightChecks.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'ConfigureComputerName' { Invoke-ComputerNameStep -UsbRoot $UsbRoot -State $State -StatePath $StatePath -Config $Config }

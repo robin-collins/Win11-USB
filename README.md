@@ -18,7 +18,9 @@ flowchart TD
   E --> F
   F --> G["OSIT logs on once"]
   G --> H["Start-Deployment.ps1 opens from the USB"]
-  H --> I["Preflight checks"]
+  H --> H2["Network/WiFi driver install attempt"]
+  H2 --> H3["MSP WiFi connect if needed"]
+  H3 --> I["Preflight checks"]
   I --> J["Computer name and local admin prompts if configured"]
   J --> K["Power settings"]
   K --> L["Windows Updates"]
@@ -46,6 +48,7 @@ flowchart TD
 
 Expect these interaction points:
 
+- Network/WiFi driver install runs before any network-dependent step, so a WiFi chip lacking an inbox driver has a chance to come online before MSP WiFi connect and preflight's internet check.
 - Preflight failures stop before real work starts, so missing internet, wrong Windows edition, no AC power, missing config, or USB write problems are caught early.
 - Reboots during rename or Windows Update are normal. The scheduled task resumes the same deployment on next logon.
 - If a model driver folder is missing, the script creates the exact folder and lets the technician copy drivers and recheck, or continue without extra offline drivers.
@@ -73,6 +76,12 @@ Deployment\
     HP\
     Lenovo\
     Generic\
+    Network\
+      Intel\
+      Realtek\
+      Qualcomm\
+      Broadcom\
+      Generic\
   Tools\
 ```
 
@@ -311,6 +320,28 @@ After Windows Updates complete, `Install-ModelDrivers.ps1` detects the model and
 - folder exists with `.inf` files: installs them with `pnputil /add-driver /subdirs /install`.
 - folder exists but is empty: treats this as intentional and continues.
 - folder is missing: creates it, shows the exact path, and lets the technician recheck after copying drivers or continue without offline drivers.
+
+### Network/WiFi Driver Folders (Installed Before Any Network Step)
+
+A bare Windows 11 image sometimes has no inbox driver for the installed WiFi chip, which would otherwise make `MspWifiSetup` and `Preflight`'s internet check fail before `Install-ModelDrivers.ps1` ever gets a chance to run (it runs after Windows Update, much later). To cover this, the `NetworkDrivers` step runs **first**, before `MspWifiSetup` and `Preflight`, and installs every vendor folder under:
+
+```text
+Deployment\Drivers\Network\<Vendor>
+```
+
+Default vendor folders created on the USB:
+
+```text
+Deployment\Drivers\Network\Intel
+Deployment\Drivers\Network\Realtek
+Deployment\Drivers\Network\Qualcomm
+Deployment\Drivers\Network\Broadcom
+Deployment\Drivers\Network\Generic
+```
+
+Any subfolder name works; these are just a starting point. Drop the WiFi/NIC driver package for each vendor you support into its own folder — for example, if a fleet mixes three different WiFi chip vendors, populate all three folders and every vendor folder is tried on every deployment. `pnputil` only binds a driver to hardware whose ID actually matches, so trying an unrelated vendor's package on a machine that doesn't have that chip is a harmless no-op, not an error. Empty vendor folders are skipped; a missing vendor folder is recreated automatically and then skipped the same way.
+
+Controlled by `install_network_drivers` in `deployment_config.json` (default `true`).
 
 ## App Installation
 

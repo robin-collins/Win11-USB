@@ -28,31 +28,10 @@ Write-DeploymentState -State $state -StatePath $StatePath
 
 Write-Log -Level Info -Message "Detected hardware: manufacturer '$($system.Manufacturer)' as '$manufacturer'; model '$($system.Model)' as '$model'."
 
-function Install-InfDriversFromFolder {
-    param([Parameter(Mandatory = $true)][string]$Folder)
-
-    $infFiles = @(Get-ChildItem -LiteralPath $Folder -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)
-    if ($infFiles.Count -eq 0) {
-        Write-Log -Level Info -Message "No .inf files found in $Folder."
-        return [ordered]@{ installed = $false; count = 0; folder = $Folder }
-    }
-
-    $result = Invoke-ExternalCommand -FilePath pnputil.exe -Arguments @('/add-driver', (Join-Path $Folder '*.inf'), '/subdirs', '/install') -AllowedExitCodes @(0, 3010) -LogName 'pnputil-model-drivers.log'
-    $summary = [ordered]@{
-        installed = $true
-        count = $infFiles.Count
-        folder = $Folder
-        exit_code = $result.exit_code
-    }
-    Write-Log -Level Success -Message "Processed $($infFiles.Count) driver INF file(s) from $Folder."
-    Write-StructuredLog -Level Info -Message 'Model driver installation result' -Data $summary
-    return $summary
-}
-
 if (Test-Path -LiteralPath $driverFolder -PathType Container) {
     $infFiles = @(Get-ChildItem -LiteralPath $driverFolder -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)
     if ($infFiles.Count -gt 0) {
-        Install-InfDriversFromFolder -Folder $driverFolder | Out-Null
+        Install-InfDriversFromFolder -Folder $driverFolder -LogName 'pnputil-model-drivers.log' | Out-Null
     } else {
         Write-Log -Level Success -Message "Model driver folder exists and is empty. Treating as intentional: $driverFolder"
         Add-StateHistory -State $state -Event 'model_driver_folder_empty' -Data @{ folder = $driverFolder }
@@ -88,7 +67,7 @@ do {
 } until ($choice -in @('A', 'B'))
 
 if ($choice -eq 'A') {
-    Install-InfDriversFromFolder -Folder $driverFolder | Out-Null
+    Install-InfDriversFromFolder -Folder $driverFolder -LogName 'pnputil-model-drivers.log' | Out-Null
 } else {
     Write-Log -Level Warn -Message "Continuing without offline drivers for $manufacturer\\$model."
     Add-StateHistory -State $state -Event 'model_drivers_skipped_by_technician' -Data @{ folder = $driverFolder }

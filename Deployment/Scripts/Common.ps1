@@ -90,6 +90,7 @@ function Get-DeploymentPaths {
         WingetApps  = Join-Path $root 'Deployment\Apps\Winget'
         LocalApps   = Join-Path $root 'Deployment\Apps\Local'
         Drivers     = Join-Path $root 'Deployment\Drivers'
+        NetworkDrivers = Join-Path $root 'Deployment\Drivers\Network'
         Tools       = Join-Path $root 'Deployment\Tools'
         StateFile   = Join-Path $root 'Deployment\State\deployment_state.json'
         ConfigFile  = Join-Path $root 'Deployment\Config\deployment_config.json'
@@ -107,13 +108,46 @@ function Initialize-DeploymentDirectories {
             $paths.Deployment, $paths.Config, $paths.Scripts, $paths.State, $paths.Logs,
             $paths.Reports, $paths.Apps, $paths.WingetApps, $paths.LocalApps,
             $paths.Drivers, (Join-Path $paths.Drivers 'Dell'), (Join-Path $paths.Drivers 'HP'),
-            (Join-Path $paths.Drivers 'Lenovo'), (Join-Path $paths.Drivers 'Generic'), $paths.Tools
+            (Join-Path $paths.Drivers 'Lenovo'), (Join-Path $paths.Drivers 'Generic'),
+            $paths.NetworkDrivers, (Join-Path $paths.NetworkDrivers 'Intel'),
+            (Join-Path $paths.NetworkDrivers 'Realtek'), (Join-Path $paths.NetworkDrivers 'Qualcomm'),
+            (Join-Path $paths.NetworkDrivers 'Broadcom'), (Join-Path $paths.NetworkDrivers 'Generic'),
+            $paths.Tools
         )) {
         if (-not (Test-Path -LiteralPath $path -PathType Container)) {
             New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null
         }
     }
     return $paths
+}
+
+function Install-InfDriversFromFolder {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Folder,
+        [string]$LogName = 'pnputil-drivers.log'
+    )
+
+    $infFiles = @(Get-ChildItem -LiteralPath $Folder -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)
+    if ($infFiles.Count -eq 0) {
+        Write-Log -Level Info -Message "No .inf files found in $Folder."
+        return [ordered]@{ installed = $false; count = 0; folder = $Folder }
+    }
+
+    # pnputil stages every matching driver into the driver store; INFs whose hardware ID is
+    # not present on this device are simply skipped, so trying an unrelated vendor's package
+    # here is harmless. This lets the toolkit carry drivers for several NIC vendors and try
+    # them all without knowing in advance which chip a given machine has.
+    $result = Invoke-ExternalCommand -FilePath pnputil.exe -Arguments @('/add-driver', (Join-Path $Folder '*.inf'), '/subdirs', '/install') -AllowedExitCodes @(0, 3010) -LogName $LogName
+    $summary = [ordered]@{
+        installed = $true
+        count     = $infFiles.Count
+        folder    = $Folder
+        exit_code = $result.exit_code
+    }
+    Write-Log -Level Success -Message "Processed $($infFiles.Count) driver INF file(s) from $Folder."
+    Write-StructuredLog -Level Info -Message 'Driver installation result' -Data $summary
+    return $summary
 }
 
 function Read-JsonFile {
@@ -202,6 +236,7 @@ function Get-DefaultDeploymentConfig {
         datto_rmm_required               = $true
         install_local_apps               = $true
         install_offline_drivers          = $true
+        install_network_drivers          = $true
         stop_before_domain_join          = $true
         fail_on_missing_required_app     = $true
         fail_on_windows_home             = $true

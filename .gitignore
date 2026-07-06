@@ -29,3 +29,10 @@ Deployment/Drivers/*/*
 !Deployment/Drivers/HP/.gitkeep
 !Deployment/Drivers/Lenovo/.gitkeep
 !Deployment/Drivers/Generic/.gitkeep
+
+# Network/WiFi driver vendor folders are nested one level deeper (Drivers/Network/<Vendor>),
+# so the vendor directories themselves must be re-included before their contents can be
+# re-ignored, or their .gitkeep placeholders would be excluded along with real driver payloads.
+!Deployment/Drivers/Network/*/
+Deployment/Drivers/Network/*/*
+!Deployment/Drivers/Network/*/.gitkeep
