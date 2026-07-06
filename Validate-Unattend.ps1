@@ -68,6 +68,7 @@
         http://schneegans.de/computer/unattend-schema/
 #>
 
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'This is an interactive technician/CI console validator; colored pass/warn/fail output (Add-ValidationResult) is the primary reporting mechanism, alongside the process exit code.')]
 [CmdletBinding()]
 param(
     [string]$Path,
@@ -312,7 +313,9 @@ function Install-AdkPackagesWithWinget {
 }
 
 function Test-XmlSchema {
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSReviewUnusedParameter', 'schemaEventSender', Justification = 'System.Xml.Schema.ValidationEventHandler''s delegate signature requires (sender, args); the sender parameter is unused by design.')]
     [CmdletBinding()]
+    [OutputType([System.Object[]])]
     param(
         [Parameter(Mandatory = $true)][string]$XmlPath,
         [Parameter(Mandatory = $true)][string]$SchemaText
@@ -379,7 +382,7 @@ function Get-UnattendNamespaceManager {
 
     $ns = New-Object System.Xml.XmlNamespaceManager($Xml.NameTable)
     $ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend') | Out-Null
-    Write-Output -NoEnumerate $ns
+    Write-Output -InputObject $ns -NoEnumerate
 }
 
 function Get-NodeText {

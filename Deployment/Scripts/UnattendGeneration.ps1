@@ -155,6 +155,7 @@ function Merge-AutounattendTemplate {
 }
 
 function Write-PreparedAutounattend {
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingPlainTextForPassword', 'Password', Justification = 'The password is escaped directly into Autounattend.xml as plaintext (the unattend schema''s own AutoLogon/LocalAccount format requires plaintext or a documented "obfuscated" base64+padding that is not actually secure). There is no SecureString path into an XML text node.')]
     param(
         [string]$SourcePath,
         [string]$TargetPath,

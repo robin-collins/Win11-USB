@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'Write-Log (below) is this toolkit''s own logging wrapper: it deliberately uses Write-Host for colored, technician-facing console output at the keyboard during a deployment, in addition to writing the audited structured/transcript log via Write-StructuredLog. This is intentional interactive CLI UX, not library output.')]
 [CmdletBinding()]
 param()
 
@@ -62,6 +63,7 @@ function ConvertTo-PlainHashtable {
 
 function Get-UsbRoot {
     [CmdletBinding()]
+    [OutputType([string])]
     param([string]$VolumeLabel = $script:DeploymentVolumeLabel)
 
     $volume = $null
@@ -98,6 +100,7 @@ function Get-UsbRoot {
 
 function Get-DeploymentPaths {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param([Parameter(Mandatory = $true)][string]$UsbRoot)
 
     $root = (Resolve-Path -LiteralPath $UsbRoot -ErrorAction Stop).Path
@@ -171,6 +174,7 @@ function Initialize-DeploymentDirectories {
 
 function Install-InfDriversFromFolder {
     [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
         [Parameter(Mandatory = $true)][string]$Folder,
         [string]$LogName = 'pnputil-drivers.log'
@@ -200,6 +204,7 @@ function Install-InfDriversFromFolder {
 
 function Read-JsonFile {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [switch]$Required
@@ -333,6 +338,7 @@ function Get-DeploymentConfig {
 
 function Get-SafeName {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value,
         [string]$Fallback = 'Unknown'
@@ -351,6 +357,7 @@ function Get-SafeName {
 
 function ConvertTo-NormalizedManufacturer {
     [CmdletBinding()]
+    [OutputType([string])]
     param([AllowEmptyString()][string]$Manufacturer)
 
     $m = ($Manufacturer | ForEach-Object { [string]$_ }).Trim()
@@ -363,7 +370,9 @@ function ConvertTo-NormalizedManufacturer {
 }
 
 function ConvertTo-NormalizedModel {
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSReviewUnusedParameter', 'Manufacturer', Justification = 'Kept for call-site symmetry with ConvertTo-NormalizedManufacturer; Install-ModelDrivers.ps1 already passes -Manufacturer here and the parameter is reserved for future manufacturer-specific model cleanup rules.')]
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [AllowEmptyString()][string]$Model,
         [AllowEmptyString()][string]$Manufacturer = ''
@@ -392,6 +401,7 @@ function Test-IsAdministrator {
 
 function Get-DeviceIdentity {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param()
 
     $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction SilentlyContinue
@@ -417,6 +427,7 @@ function New-DeploymentRunId {
 
 function New-DeploymentState {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param([string]$RunId)
 
     $identity = Get-DeviceIdentity
@@ -549,6 +560,7 @@ function Set-StateFailure {
 
 function Test-UsableSerialNumber {
     [CmdletBinding()]
+    [OutputType([bool])]
     param([AllowEmptyString()][string]$SerialNumber)
 
     if ([string]::IsNullOrWhiteSpace($SerialNumber)) { return $false }
@@ -563,6 +575,7 @@ function Test-UsableSerialNumber {
 
 function Test-UsableDeviceUuid {
     [CmdletBinding()]
+    [OutputType([bool])]
     param([AllowEmptyString()][string]$Uuid)
 
     if ([string]::IsNullOrWhiteSpace($Uuid)) { return $false }
@@ -584,6 +597,7 @@ function Get-DeviceFolderName {
 
 function Test-StateMatchesDevice {
     [CmdletBinding()]
+    [OutputType([bool])]
     param([Parameter(Mandatory = $true)][hashtable]$State)
 
     $identity = Get-DeviceIdentity
@@ -615,6 +629,7 @@ function Test-StateMatchesDevice {
 
 function Initialize-DeploymentLogging {
     [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
         [Parameter(Mandatory = $true)][string]$UsbRoot,
         [Parameter(Mandatory = $true)][hashtable]$State
@@ -649,7 +664,13 @@ function Initialize-DeploymentLogging {
 }
 
 function Stop-DeploymentLogging {
-    try { Stop-Transcript | Out-Null } catch {}
+    try {
+        Stop-Transcript | Out-Null
+    } catch {
+        # Stop-Transcript throws when no transcript is active (for example, transcript start
+        # failed earlier); this is a best-effort cleanup call, not a deployment requirement.
+        Write-Verbose "Stop-Transcript failed (non-fatal, best effort): $($_.Exception.Message)"
+    }
 }
 
 function Write-StructuredLog {
@@ -670,6 +691,12 @@ function Write-StructuredLog {
 }
 
 function Write-Log {
+    # PSScriptAnalyzer's cross-platform compatibility database lists a 'Write-Log' cmdlet for
+    # some PowerShell core/Windows module combinations that are never loaded by this toolkit
+    # (plain Windows PowerShell 5.1 on client notebooks, no extra modules imported that ship a
+    # conflicting cmdlet). This function is this toolkit's own long-established logging wrapper,
+    # called from every deployment script; renaming it is out of scope for a lint-fix pass.
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'No such cmdlet is ever loaded in this toolkit''s actual execution environment; renaming this pervasively-called wrapper is out of scope for a lint-only pass.')]
     [CmdletBinding()]
     param(
         [ValidateSet('Debug', 'Info', 'Warn', 'Error', 'Success')][string]$Level = 'Info',
@@ -729,6 +756,7 @@ function ConvertTo-ProcessArgumentString {
 
 function Invoke-ExternalCommand {
     [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$Arguments = @(),
@@ -785,6 +813,7 @@ function Invoke-ExternalCommand {
 
 function Split-CommandLineArguments {
     [CmdletBinding()]
+    [OutputType([System.Object[]])]
     param([AllowEmptyString()][string]$ArgumentString)
 
     if ([string]::IsNullOrWhiteSpace($ArgumentString)) { return @() }
@@ -822,6 +851,7 @@ function Invoke-WithRetry {
 
 function Test-InternetConnectivity {
     [CmdletBinding()]
+    [OutputType([bool])]
     param([string[]]$Hosts = @('www.microsoft.com', 'cdn.winget.microsoft.com', 'www.powershellgallery.com'))
 
     foreach ($hostName in $Hosts) {
@@ -835,13 +865,19 @@ function Test-InternetConnectivity {
                 return $true
             }
             $client.Close()
-        } catch {}
+        } catch {
+            # A single host being unreachable/refusing the connection is expected and simply
+            # means trying the next candidate host; only exhausting the whole list means no
+            # connectivity.
+            Write-Verbose "Connectivity probe to $hostName failed (non-fatal): $($_.Exception.Message)"
+        }
     }
     return $false
 }
 
 function Test-PendingReboot {
     [CmdletBinding()]
+    [OutputType([bool])]
     param()
 
     $paths = @(
@@ -855,7 +891,9 @@ function Test-PendingReboot {
     try {
         $session = Get-ItemProperty -LiteralPath $paths[2] -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
         if ($session.PendingFileRenameOperations) { return $true }
-    } catch {}
+    } catch {
+        Write-Verbose "Could not read PendingFileRenameOperations (non-fatal, treated as no pending reboot from this source): $($_.Exception.Message)"
+    }
     return $false
 }
 
@@ -941,6 +979,7 @@ function Unregister-DeploymentResumeTask {
 
 function Enable-DeploymentAutoLogon {
     [CmdletBinding()]
+    [OutputType([string])]
     param([Parameter(Mandatory = $true)][string]$UsbRoot)
 
     # Autounattend's AutoLogon only fires once (LogonCount=1), covering the very first boot
@@ -1004,6 +1043,7 @@ function Show-DeploymentToast {
 
 function Get-DeploymentProcessInfo {
     [CmdletBinding()]
+    [OutputType([System.Object[]])]
     param()
 
     try {
@@ -1023,6 +1063,7 @@ function Get-DeploymentProcessInfo {
 
 function Enter-DeploymentRunLock {
     [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param()
 
     $mutex = New-Object System.Threading.Mutex($false, $script:DeploymentRunMutexName)
@@ -1043,7 +1084,13 @@ function Exit-DeploymentRunLock {
     param([Parameter(Mandatory = $true)][object]$Lock)
 
     if ($Lock.Acquired) {
-        try { $Lock.Mutex.ReleaseMutex() | Out-Null } catch {}
+        try {
+            $Lock.Mutex.ReleaseMutex() | Out-Null
+        } catch {
+            # Best-effort release: an abandoned-mutex takeover (see Enter-DeploymentRunLock)
+            # can leave nothing to release here, which must not fail cleanup.
+            Write-Verbose "Mutex release failed (non-fatal, best effort): $($_.Exception.Message)"
+        }
     }
     $Lock.Mutex.Dispose()
 }
@@ -1097,13 +1144,18 @@ function Get-InstalledProgramNames {
             $names += Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
                 Where-Object { $_.DisplayName } |
                 Select-Object -ExpandProperty DisplayName
-        } catch {}
+        } catch {
+            # A missing/inaccessible uninstall registry hive (for example WOW6432Node on a
+            # 32-bit OS) simply contributes no names; the other hives still get checked.
+            Write-Verbose "Could not enumerate uninstall registry root $root (non-fatal): $($_.Exception.Message)"
+        }
     }
     return ($names | Sort-Object -Unique)
 }
 
 function Test-ProgramInstalled {
     [CmdletBinding()]
+    [OutputType([bool])]
     param([Parameter(Mandatory = $true)][string]$Pattern)
 
     $programs = Get-InstalledProgramNames
@@ -1132,6 +1184,7 @@ function New-RandomPassword {
 
 function ConvertFrom-SecureStringToPlainText {
     [CmdletBinding()]
+    [OutputType([string])]
     param([Parameter(Mandatory = $true)][securestring]$SecureString)
 
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
@@ -1165,6 +1218,7 @@ function Get-DotEnvValue {
 
 function Get-OsitLocalAdminPassword {
     [CmdletBinding()]
+    [OutputType([string])]
     param([string[]]$SearchRoots = @())
 
     foreach ($target in @('Process', 'User', 'Machine')) {
@@ -1184,6 +1238,7 @@ function Get-OsitLocalAdminPassword {
 
 function Get-OsitWifiPassword {
     [CmdletBinding()]
+    [OutputType([string])]
     param([string[]]$SearchRoots = @())
 
     foreach ($target in @('Process', 'User', 'Machine')) {
@@ -1241,6 +1296,7 @@ function Get-SmtpConfig {
 
 function Get-OsitSmtpPassword {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [string[]]$SearchRoots = @(),
         [string]$EnvVarName = 'OSIT_SMTP_PASSWORD'

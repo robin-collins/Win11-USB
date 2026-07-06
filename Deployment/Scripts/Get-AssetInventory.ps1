@@ -37,7 +37,7 @@ function Get-SecureBootSummary {
 function Get-ActivationSummary {
     try {
         Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction Stop |
-            Where-Object { $_.PartialProductKey -and $_.LicenseStatus -ne $null } |
+            Where-Object { $_.PartialProductKey -and $null -ne $_.LicenseStatus } |
             Select-Object Name, Description, LicenseStatus, PartialProductKey
     } catch {
         @([ordered]@{ error = $_.Exception.Message })
@@ -66,7 +66,10 @@ $inventory = [ordered]@{
         sku = if ($product) { $product.SKUNumber } else { '' }
     }
     bios = [ordered]@{
-        version = if ($bios) { ($bios.SMBIOSBIOSVersion, $bios.Version -ne $null | Select-Object -First 1) } else { '' }
+        # Picks whichever of SMBIOSBIOSVersion/Version is non-null, preferring SMBIOSBIOSVersion.
+        # Uses Where-Object (rather than the array -ne $null idiom) so $null can be on the left
+        # of the comparison without losing the array's element-filtering behavior.
+        version = if ($bios) { (@($bios.SMBIOSBIOSVersion, $bios.Version) | Where-Object { $null -ne $_ } | Select-Object -First 1) } else { '' }
         release_date = if ($bios -and $bios.ReleaseDate) { $bios.ReleaseDate.ToString('o') } else { '' }
     }
     security = [ordered]@{

@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessage('PSReviewUnusedParameter', 'StatePath', Justification = 'Accepted for calling-convention parity: Start-Deployment.ps1 invokes every step script uniformly with -UsbRoot/-StatePath. This step performs read-only checks and does not itself need to write state.')]
 [CmdletBinding()]
 param(
     [string]$UsbRoot,

@@ -86,7 +86,7 @@ foreach ($package in @($packageConfig.packages)) {
         continue
     }
 
-    $args = @(
+    $wingetArgs = @(
         'install',
         '--id', $id,
         '--exact',
@@ -96,11 +96,11 @@ foreach ($package in @($packageConfig.packages)) {
         '--disable-interactivity'
     )
     if (-not [string]::IsNullOrWhiteSpace($installArguments)) {
-        $args += @('--override', $installArguments)
+        $wingetArgs += @('--override', $installArguments)
     }
 
     try {
-        $install = Invoke-ExternalCommand -FilePath $winget -Arguments $args -AllowedExitCodes @(0, 3010, $script:WingetRebootRequiredToFinish, $script:WingetRebootRequiredToInstall) -LogName ("winget-install-{0}.log" -f (Get-SafeName -Value $id))
+        $install = Invoke-ExternalCommand -FilePath $winget -Arguments $wingetArgs -AllowedExitCodes @(0, 3010, $script:WingetRebootRequiredToFinish, $script:WingetRebootRequiredToInstall) -LogName ("winget-install-{0}.log" -f (Get-SafeName -Value $id))
         $status = if ($install.exit_code -ne 0) { 'InstalledRebootRequired' } else { 'Installed' }
         Write-Log -Level Success -Message "$displayName install result: $status."
         $results += ,([ordered]@{ id = $id; display_name = $displayName; status = $status; required = $required; exit_code = $install.exit_code })

@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'This is an interactive technician diagnostic CLI; the colored console summary is the primary deliverable alongside the written report file.')]
 [CmdletBinding()]
 param(
     [string]$UsbRoot,

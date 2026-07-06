@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'This script is an interactive technician CLI (USB preparation wizard): colored status output and Read-Host prompts are the intended UX, not library output.')]
 [CmdletBinding()]
 param(
     [string]$UsbRoot,
@@ -24,14 +25,12 @@ function Set-DotEnvSecret {
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
         $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
         $found = $false
-        $lines = @($lines | ForEach-Object {
-                if ($_ -match "^\s*$([regex]::Escape($Name))\s*=") {
-                    $found = $true
-                    "$Name=$Value"
-                } else {
-                    $_
-                }
-            })
+        for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+            if ($lines[$lineIndex] -match "^\s*$([regex]::Escape($Name))\s*=") {
+                $found = $true
+                $lines[$lineIndex] = "$Name=$Value"
+            }
+        }
         if (-not $found) { $lines += "$Name=$Value" }
     } else {
         $lines = @("$Name=$Value")

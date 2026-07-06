@@ -128,6 +128,7 @@ function Remove-MspWifiProfile {
 }
 
 function Connect-MspWifiProfile {
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingPlainTextForPassword', 'Password', Justification = 'The WLAN profile XML format (netsh wlan add profile) requires the pre-shared key as plaintext keyMaterial; there is no SecureString/PSCredential equivalent for this XML.')]
     param(
         [string]$Ssid,
         [string]$Authentication,

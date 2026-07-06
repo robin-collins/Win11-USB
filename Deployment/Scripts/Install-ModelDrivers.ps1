@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'Interactive technician prompt (A/B choice) for handling a missing model driver folder; colored console output is the intended UX for the person at the keyboard during deployment.')]
 [CmdletBinding()]
 param(
     [string]$UsbRoot,

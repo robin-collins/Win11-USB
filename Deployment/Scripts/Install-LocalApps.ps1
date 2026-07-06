@@ -19,6 +19,7 @@ if (-not $appConfig.ContainsKey('apps')) {
 }
 
 function Test-LocalAppDetected {
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingInvokeExpression', '', Justification = 'The detection command string comes from this toolkit''s own local_apps.json, authored by the deploying technician/MSP (not external/untrusted input); arbitrary expression evaluation is the intended extensibility point for custom detection logic per app entry.')]
     param([object]$Detection)
 
     if (-not $Detection) { return $false }
@@ -58,14 +59,14 @@ function Invoke-LocalInstaller {
 
     switch ($InstallerType.ToLowerInvariant()) {
         'msi' {
-            $args = @('/i', $InstallerPath)
-            if ([string]::IsNullOrWhiteSpace($SilentArguments)) { $args += @('/qn', '/norestart') } else { $args += (Split-CommandLineArguments -ArgumentString $SilentArguments) }
-            return Invoke-ExternalCommand -FilePath msiexec.exe -Arguments $args -AllowedExitCodes @(0, 3010, 1641) -LogName $LogName
+            $installerArgs = @('/i', $InstallerPath)
+            if ([string]::IsNullOrWhiteSpace($SilentArguments)) { $installerArgs += @('/qn', '/norestart') } else { $installerArgs += (Split-CommandLineArguments -ArgumentString $SilentArguments) }
+            return Invoke-ExternalCommand -FilePath msiexec.exe -Arguments $installerArgs -AllowedExitCodes @(0, 3010, 1641) -LogName $LogName
         }
         'exe' {
-            $args = @()
-            if (-not [string]::IsNullOrWhiteSpace($SilentArguments)) { $args = Split-CommandLineArguments -ArgumentString $SilentArguments }
-            return Invoke-ExternalCommand -FilePath $InstallerPath -Arguments $args -AllowedExitCodes @(0, 3010, 1641) -LogName $LogName
+            $installerArgs = @()
+            if (-not [string]::IsNullOrWhiteSpace($SilentArguments)) { $installerArgs = Split-CommandLineArguments -ArgumentString $SilentArguments }
+            return Invoke-ExternalCommand -FilePath $InstallerPath -Arguments $installerArgs -AllowedExitCodes @(0, 3010, 1641) -LogName $LogName
         }
         'msix' {
             Add-AppxPackage -Path $InstallerPath -ErrorAction Stop
@@ -76,9 +77,9 @@ function Invoke-LocalInstaller {
             return [ordered]@{ exit_code = 0; stdout = 'Add-AppxPackage completed.'; stderr = '' }
         }
         'script' {
-            $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $InstallerPath)
-            if (-not [string]::IsNullOrWhiteSpace($SilentArguments)) { $args += (Split-CommandLineArguments -ArgumentString $SilentArguments) }
-            return Invoke-ExternalCommand -FilePath powershell.exe -Arguments $args -AllowedExitCodes @(0, 3010) -LogName $LogName
+            $installerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $InstallerPath)
+            if (-not [string]::IsNullOrWhiteSpace($SilentArguments)) { $installerArgs += (Split-CommandLineArguments -ArgumentString $SilentArguments) }
+            return Invoke-ExternalCommand -FilePath powershell.exe -Arguments $installerArgs -AllowedExitCodes @(0, 3010) -LogName $LogName
         }
         default {
             throw "Unsupported installer_type '$InstallerType' for $InstallerPath."
