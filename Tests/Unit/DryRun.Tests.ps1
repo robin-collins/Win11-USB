@@ -205,14 +205,22 @@ Describe 'Initialize-DeploymentLogging dry-run folder (state isolation invariant
         Mock Get-DeviceIdentity $identityMock
         $state = @{ deployment_run_id = 'runid-real' }
         $ctx = Initialize-DeploymentLogging -UsbRoot $script:LoggingTestRoot -State $state
-        try { Stop-DeploymentLogging } catch {}
+        try { Stop-DeploymentLogging } catch {
+            # Stop-DeploymentLogging is not the focus of this test (it only verifies the
+            # dry-run-prefixed log folder naming); tolerate it being a no-op/unavailable here.
+            Write-Verbose "Stop-DeploymentLogging: $_"
+        }
         Split-Path -Leaf $ctx.LogDir | Should -Be 'runid-real'
 
         . Set-DryRunEnv -Value '1'
         Mock Get-DeviceIdentity $identityMock
         $dryState = @{ deployment_run_id = 'runid-dry' }
         $dryCtx = Initialize-DeploymentLogging -UsbRoot $script:LoggingTestRoot -State $dryState
-        try { Stop-DeploymentLogging } catch {}
+        try { Stop-DeploymentLogging } catch {
+            # Stop-DeploymentLogging is not the focus of this test (it only verifies the
+            # dry-run-prefixed log folder naming); tolerate it being a no-op/unavailable here.
+            Write-Verbose "Stop-DeploymentLogging: $_"
+        }
         Split-Path -Leaf $dryCtx.LogDir | Should -Be 'dryrun-runid-dry'
     }
 }

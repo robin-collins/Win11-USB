@@ -1,21 +1,74 @@
-[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'Interactive technician prompts (resume/restart/quit choices) and colored status output at the console; Write-Log is used in parallel for the audited/structured log.')]
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'Interactive technician prompts (resume/restart/quit choices), the dry-run mode banner, and colored status output at the console; Write-Log is used in parallel for the audited/structured log.')]
 [CmdletBinding()]
 param(
     [string]$UsbRoot,
     [switch]$Reset,
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [switch]$DryRun
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+if ($DryRun) {
+    # Must be set before Common.ps1 is dot-sourced below: $script:DeploymentDryRun (in
+    # Common.ps1) is read from this environment variable once, at dot-source time, so every
+    # child step script that dot-sources Common.ps1 on its own inherits dry-run mode with
+    # zero signature churn (FABLE_TASKS.md Phase B invariant; T05/T06).
+    $env:OSIT_DEPLOYMENT_DRYRUN = '1'
+}
+
 . "$PSScriptRoot\Common.ps1"
+
+# -DryRun implies -NonInteractive unless the caller explicitly overrides it (for example
+# -NonInteractive:$false); a dry run must never block on a technician prompt.
+if ($DryRun -and -not $PSBoundParameters.ContainsKey('NonInteractive')) {
+    $NonInteractive = $true
+}
+
+if ($DryRun) {
+    Write-Host ''
+    Write-Host '================================================================' -ForegroundColor Magenta
+    Write-Host '===                     DRY RUN MODE                        ===' -ForegroundColor Magenta
+    Write-Host '=== No machine state will be changed. Detection/validation   ===' -ForegroundColor Magenta
+    Write-Host '=== logic runs for real; every mutating action is logged     ===' -ForegroundColor Magenta
+    Write-Host '=== instead of executed. See DRYRUN log lines and            ===' -ForegroundColor Magenta
+    Write-Host '=== state.dryrun_actions for the full audit trail.           ===' -ForegroundColor Magenta
+    Write-Host '================================================================' -ForegroundColor Magenta
+    Write-Host ''
+    Write-Log -Level Warn -Message '=== DRY RUN MODE === No machine state will be changed; mutating actions are logged instead of executed.'
+}
+
+function Get-DryRunSummaryLine {
+    # Pure string formatting, factored out of the completion block below purely so it has a
+    # unit-testable seam (Tests\Unit\StartDeploymentDryRun.Tests.ps1) that does not depend on
+    # any Windows-only cmdlet.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [int]$StepCount,
+        [int]$ActionCount,
+        [int]$RebootCount
+    )
+
+    return "DRYRUN RESULT: steps=$StepCount actions=$ActionCount would-reboot=$RebootCount"
+}
 
 function Initialize-StateForRun {
     param(
         [string]$StatePath,
         [switch]$Reset,
-        [switch]$NonInteractive
+        [switch]$NonInteractive,
+        [switch]$DryRun
     )
+
+    if ($DryRun) {
+        # Dry-run invariant (FABLE_TASKS.md T06): never prompt, never resume stale shadow
+        # state. Get-DeploymentPaths already points StateFile at the shadow dry-run file, so
+        # without this bypass a shadow file left behind by a previous interrupted dry run
+        # could still reach the resume/mismatch prompts below. Always start fresh instead.
+        return (New-DeploymentState -RunId (New-DeploymentRunId))
+    }
 
     $existing = Read-DeploymentState -StatePath $StatePath
     if ($existing -and $Reset) {
@@ -115,7 +168,18 @@ function Invoke-ComputerNameStep {
     }
 
     Write-Log -Level Warn -Message "Renaming computer from $env:COMPUTERNAME to $desired."
-    Rename-Computer -NewName $desired -Force -ErrorAction Stop
+    if (Test-DeploymentDryRun) {
+        Write-DryRunAction -State $State -Step 'ConfigureComputerName' -Action "would rename computer from $env:COMPUTERNAME to $desired" -Data ([ordered]@{
+                current_name = $env:COMPUTERNAME
+                desired_name = $desired
+            })
+    } else {
+        Rename-Computer -NewName $desired -Force -ErrorAction Stop
+    }
+    # Request-DeploymentReboot is already dry-run-safe (Common.ps1 T05): it logs "would
+    # reboot", records state.dryrun_reboots, and returns instead of exiting/restarting. It
+    # must still be called here even in dry-run so the "would-reboot" count in the T06
+    # summary stays consistent with a real run's reboot points.
     Request-DeploymentReboot -UsbRoot $UsbRoot -State $State -StatePath $StatePath -Reason "Computer rename to $desired requires reboot."
 }
 
@@ -197,13 +261,23 @@ function New-ConfiguredLocalUserPassword {
         $password = ConvertTo-SecureString -String $plain -AsPlainText -Force
         $reportRoot = Get-DeploymentReportRoot -UsbRoot $UsbRoot
         $passwordPath = Join-Path $reportRoot ("local-user-password-{0}-{1}.txt" -f (Get-SafeName -Value $username), $State.deployment_run_id)
-        Set-Content -LiteralPath $passwordPath -Value @(
-            "Username: $username",
-            "Password: $plain",
-            "Generated: $((Get-Date).ToString('o'))",
-            'Rotate this password during final customer onboarding.'
-        ) -Encoding UTF8 -Force
-        Write-Log -Level Warn -Message "Generated password for $username was written to $passwordPath. Treat this file as sensitive."
+        if (Test-DeploymentDryRun) {
+            # Deliberately omit the plaintext password from the recorded dry-run data (same
+            # convention as Enable-DeploymentAutoLogon in Common.ps1); the audit trail must
+            # not itself become a place a credential leaks.
+            Write-DryRunAction -State $State -Step 'CreateLocalAdmin' -Action "would write generated password report for '$username'" -Data ([ordered]@{
+                    username      = $username
+                    password_path = $passwordPath
+                })
+        } else {
+            Set-Content -LiteralPath $passwordPath -Value @(
+                "Username: $username",
+                "Password: $plain",
+                "Generated: $((Get-Date).ToString('o'))",
+                'Rotate this password during final customer onboarding.'
+            ) -Encoding UTF8 -Force
+            Write-Log -Level Warn -Message "Generated password for $username was written to $passwordPath. Treat this file as sensitive."
+        }
         return $password
     }
 
@@ -213,7 +287,8 @@ function New-ConfiguredLocalUserPassword {
 function Add-UserToConfiguredGroups {
     param(
         [string]$Username,
-        [object[]]$Groups
+        [object[]]$Groups,
+        [hashtable]$State
     )
 
     foreach ($group in @($Groups)) {
@@ -222,8 +297,18 @@ function Add-UserToConfiguredGroups {
         $members = @(Get-LocalGroupMember -Group $groupName -ErrorAction Stop | Select-Object -ExpandProperty Name)
         $localName = "$env:COMPUTERNAME\$Username"
         if ($members -notcontains $localName -and $members -notcontains $Username) {
-            Add-LocalGroupMember -Group $groupName -Member $Username -ErrorAction Stop
-            Write-Log -Level Success -Message "$Username was added to local group $groupName."
+            if (Test-DeploymentDryRun) {
+                # In dry-run the user itself was never actually created (New-LocalUser is
+                # guarded below), so real membership never changes here either; the group
+                # membership check above still ran for real against whatever groups exist.
+                Write-DryRunAction -State $State -Step 'CreateLocalAdmin' -Action "would add '$Username' to local group '$groupName'" -Data ([ordered]@{
+                        username = $Username
+                        group    = $groupName
+                    })
+            } else {
+                Add-LocalGroupMember -Group $groupName -Member $Username -ErrorAction Stop
+                Write-Log -Level Success -Message "$Username was added to local group $groupName."
+            }
         } else {
             Write-Log -Level Success -Message "$Username is already a member of local group $groupName."
         }
@@ -267,11 +352,21 @@ function Invoke-CreateLocalAdminStep {
             Write-Log -Level Success -Message "Local user $username already exists."
         } else {
             $password = New-ConfiguredLocalUserPassword -Account $account -Config $Config -State $State -UsbRoot $UsbRoot
-            New-LocalUser -Name $username -Password $password -FullName $fullName -Description $description -PasswordNeverExpires:$passwordNeverExpires -ErrorAction Stop | Out-Null
-            Write-Log -Level Success -Message "Local user $username was created."
+            if (Test-DeploymentDryRun) {
+                Write-DryRunAction -State $State -Step 'CreateLocalAdmin' -Action "would create local user '$username'" -Data ([ordered]@{
+                        username                = $username
+                        full_name               = $fullName
+                        description             = $description
+                        groups                  = $groups
+                        password_never_expires  = $passwordNeverExpires
+                    })
+            } else {
+                New-LocalUser -Name $username -Password $password -FullName $fullName -Description $description -PasswordNeverExpires:$passwordNeverExpires -ErrorAction Stop | Out-Null
+                Write-Log -Level Success -Message "Local user $username was created."
+            }
         }
 
-        Add-UserToConfiguredGroups -Username $username -Groups $groups
+        Add-UserToConfiguredGroups -Username $username -Groups $groups -State $State
         $createdUsers += ,([ordered]@{
                 username = $username
                 groups   = $groups
@@ -385,7 +480,7 @@ $paths = $null
 try {
     if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Get-DeploymentRoot }
     $paths = Initialize-DeploymentDirectories -UsbRoot $UsbRoot
-    $state = Initialize-StateForRun -StatePath $paths.StateFile -Reset:$Reset -NonInteractive:$NonInteractive
+    $state = Initialize-StateForRun -StatePath $paths.StateFile -Reset:$Reset -NonInteractive:$NonInteractive -DryRun:$DryRun
     Write-DeploymentState -State $state -StatePath $paths.StateFile
     Initialize-DeploymentLogging -UsbRoot $UsbRoot -State $state | Out-Null
     $config = Get-DeploymentConfig -UsbRoot $UsbRoot
@@ -411,8 +506,20 @@ try {
         # orchestrator, so the reboot request must be detected here. The step is left
         # incomplete on purpose: it resumes from the same step after the reboot.
         if ($state.ContainsKey('reboot_pending') -and [bool]$state.reboot_pending) {
-            Write-Log -Level Warn -Message "Step $step requested a reboot. The deployment will resume from this step after the next administrator logon."
-            exit 3010
+            if (Test-DeploymentDryRun) {
+                # Request-DeploymentReboot (Common.ps1, T05) already logged the "would reboot"
+                # line and recorded it in state.dryrun_reboots, then returned instead of
+                # exiting/restarting -- but it still sets reboot_pending exactly as a real
+                # reboot would, since that field drives this very check. A dry run must
+                # traverse every step in a single pass (FABLE_TASKS.md T06), so clear the
+                # flag here and fall through to Set-StateStepCompleted instead of stopping.
+                Write-Log -Level Info -Message "Step $step would require a reboot in a real run; continuing the dry run without stopping."
+                $state.reboot_pending = $false
+                Write-DeploymentState -State $state -StatePath $paths.StateFile
+            } else {
+                Write-Log -Level Warn -Message "Step $step requested a reboot. The deployment will resume from this step after the next administrator logon."
+                exit 3010
+            }
         }
 
         Set-StateStepCompleted -State $state -Step $step -StatePath $paths.StateFile
@@ -440,6 +547,22 @@ try {
                 }
             }
         }
+    }
+
+    if ($DryRun) {
+        $finalState = Read-DeploymentState -StatePath $paths.StateFile
+        $dryRunStepCount = @(Get-DeploymentSteps).Count
+        $dryRunActionCount = 0
+        if ($finalState -and $finalState.ContainsKey('dryrun_actions') -and $null -ne $finalState.dryrun_actions) {
+            $dryRunActionCount = @($finalState.dryrun_actions).Count
+        }
+        $dryRunRebootCount = 0
+        if ($finalState -and $finalState.ContainsKey('dryrun_reboots') -and $null -ne $finalState.dryrun_reboots) {
+            $dryRunRebootCount = @($finalState.dryrun_reboots).Count
+        }
+        $dryRunSummary = Get-DryRunSummaryLine -StepCount $dryRunStepCount -ActionCount $dryRunActionCount -RebootCount $dryRunRebootCount
+        Write-Host $dryRunSummary -ForegroundColor Magenta
+        Write-Log -Level Success -Message $dryRunSummary
     }
 } catch {
     $message = $_.Exception.Message
