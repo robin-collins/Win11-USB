@@ -613,6 +613,15 @@ try {
         $dryRunSummary = Get-DryRunSummaryLine -StepCount $dryRunStepCount -ActionCount $dryRunActionCount -RebootCount $dryRunRebootCount
         Write-Host $dryRunSummary -ForegroundColor Magenta
         Write-Log -Level Success -Message $dryRunSummary
+
+        if ($finalState) {
+            # Write-DryRunSummaryReport (Common.ps1, T08) aggregates $finalState.dryrun_actions
+            # into a Markdown report grouped by step, reusing this exact $dryRunSummary line
+            # (not recomputing the same counts a second time) so the report and the console/log
+            # line above can never disagree.
+            $dryRunSummaryReportPath = Write-DryRunSummaryReport -State $finalState -UsbRoot $UsbRoot -SummaryLine $dryRunSummary
+            Write-Host "Dry-run summary report: $dryRunSummaryReportPath" -ForegroundColor Magenta
+        }
     }
 } catch {
     $message = $_.Exception.Message
