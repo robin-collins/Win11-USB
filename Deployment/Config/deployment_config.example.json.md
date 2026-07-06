@@ -159,4 +159,15 @@ Datto installs after hostname, Windows Updates, model drivers, and winget apps, 
 | --- | --- | --- | --- |
 | `install_offline_drivers` | boolean | `true` | Enables model-specific driver install from `Deployment\Drivers\<Manufacturer>\<Model>`, run after Windows Updates. |
 | `install_network_drivers` | boolean | `true` | Enables the `NetworkDrivers` step, which runs first (before MSP WiFi setup and preflight) and installs every vendor folder under `Deployment\Drivers\Network\<Vendor>` (for example `Intel`, `Realtek`, `Qualcomm`). Use this to carry WiFi/NIC drivers for chips a bare Windows image does not have inbox drivers for, so the machine can reach the network before Preflight's internet check runs. Any subfolder name is tried; unrelated vendor packages are skipped harmlessly by pnputil rather than erroring. |
+| `local_deployment_handover` | object | see below | Optional copy-to-local-disk step so the USB can be ejected before the remaining deployment steps finish. |
 | `stop_before_domain_join` | boolean | `true` | Documents the intentional stop point. The toolkit does not domain join, Entra join, or customer identity join. |
+
+### local_deployment_handover keys
+
+| Key | Type | Example | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `false` | Enables the `LocalHandover` step, which runs after `Preflight` and before `ConfigureComputerName`, once a network connection (WiFi or Ethernet) has been established. |
+| `local_path` | string | `"C:\\1S-WIN11"` | Local destination for a full copy of the `Deployment` folder (Config, Scripts, Apps, Drivers, Tools, and the current State/Logs/Reports) plus the USB-root `.env`. |
+| `require_network` | boolean | `true` | If `true`, handover is skipped (not failed) when no network connection is currently available. Handover is not retried automatically later in the run, so a device that stays offline simply completes entirely from the USB. |
+
+When handover succeeds, every remaining step (computer name, local admin, power settings, Windows Updates, drivers, apps, Datto RMM, desktop items, reports, email) runs from `local_path` instead of the USB, and the resume scheduled task and deployment logging are both switched over automatically. The console (and a toast notification) announce that the USB can be safely ejected. If the machine is offline when `LocalHandover` runs, the step is skipped and the whole deployment simply continues from the USB as it does today.

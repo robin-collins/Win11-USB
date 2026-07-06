@@ -167,7 +167,7 @@ function Write-DeploymentStatusReport {
     Write-Host ''
 }
 
-if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Get-UsbRoot }
+if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Get-DeploymentRoot }
 
 if ($RefreshSeconds -gt 0) {
     while ($true) {

@@ -21,7 +21,10 @@ flowchart TD
   H --> H2["Network/WiFi driver install attempt"]
   H2 --> H3["MSP WiFi connect if needed"]
   H3 --> I["Preflight checks"]
-  I --> J["Computer name and local admin prompts if configured"]
+  I --> I2{"local_deployment_handover enabled and network available?"}
+  I2 -->|"Yes"| I3["Copy Deployment files to C:\1S-WIN11 and continue from local disk; USB can be ejected"]
+  I2 -->|"No"| J["Computer name and local admin prompts if configured"]
+  I3 --> J
   J --> K["Power settings"]
   K --> L["Windows Updates"]
   L --> M["Model driver check"]
@@ -30,7 +33,8 @@ flowchart TD
   O --> P["local USB apps"]
   P --> Q["Final desktop cleanup"]
   Q --> R["Asset inventory and final reports"]
-  R --> S["Ready for domain join or Entra join"]
+  R --> R2["SMTP email report and logs if smtp_config.json enabled"]
+  R2 --> S["Ready for domain join or Entra join"]
 ```
 
 ```mermaid
@@ -53,6 +57,8 @@ Expect these interaction points:
 - Reboots during rename or Windows Update are normal. The scheduled task resumes the same deployment on next logon.
 - If a model driver folder is missing, the script creates the exact folder and lets the technician copy drivers and recheck, or continue without extra offline drivers.
 - App installers only run when configured. Required app failures stop the run; optional app failures are logged.
+- When `local_deployment_handover.enabled=true`, the toolkit copies itself to `C:\1S-WIN11` (or the configured `local_path`) right after Preflight, once WiFi or Ethernet connectivity is available, and continues the rest of the deployment from there. The console and a toast notification confirm when it is safe to eject the USB and move it to the next device.
+- When `smtp_config.json` is enabled, the deployment report, Markdown summary, asset inventory, and a zip of the run's logs are emailed to the configured recipients at the end of the run (and on failure).
 - The final screen and report confirm that customer identity onboarding has not been performed.
 
 ## USB Layout
@@ -113,6 +119,7 @@ Edit the active config files under `Deployment\Config`:
 - `deployment_config.json`
 - `winget_packages.json`
 - `local_apps.json`
+- `smtp_config.json`
 
 Matching `.example.json` files are included as templates.
 
@@ -121,6 +128,7 @@ Detailed config references:
 - `Deployment\Config\deployment_config.example.json.md`
 - `Deployment\Config\winget_packages.example.json.md`
 - `Deployment\Config\local_apps.example.json.md`
+- `Deployment\Config\smtp_config.example.json.md`
 
 Important `deployment_config.json` options:
 
@@ -131,6 +139,7 @@ Important `deployment_config.json` options:
 - `require_ac_power`: fail preflight on battery power for notebooks.
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
 - `msp_wifi_setup`: connects to MSP WiFi SSID `OneSolution` before preflight internet checks. Password comes from `OSIT_WIFI_PASSWORD`. The step is skipped automatically when the device already has internet (for example Ethernet) or has no wireless adapter.
+- `local_deployment_handover`: when `enabled=true`, copies the deployment to `local_path` (default `C:\1S-WIN11`) once network is available and continues the rest of the deployment from there, so the USB can be ejected early. Default is `false`. See "Local Deployment Handover" below.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
 - `configure_power_settings`: sets power timeouts before long-running update and install stages.
@@ -159,6 +168,8 @@ The OSIT password is not stored in `deployment_config.json`. `Initialize-UsbDepl
 If neither exists, `Initialize-UsbDeployment.ps1` prompts to create one.
 
 When `msp_wifi_setup.enabled=true`, the OneSolution WiFi password is also not stored in JSON. `Initialize-UsbDeployment.ps1` reads `OSIT_WIFI_PASSWORD` from the environment or `.env`, then writes it to the USB-root `.env` so `Configure-MspWifi.ps1` can connect before preflight internet checks.
+
+When `smtp_config.json`'s `username` is non-blank, the SMTP password is likewise not stored in JSON. `Initialize-UsbDeployment.ps1` reads `OSIT_SMTP_PASSWORD` (or the name configured in `password_env_var`) from the environment or `.env`, then writes it to the USB-root `.env` so `Send-DeploymentEmail.ps1` can authenticate.
 
 Example additional local account config:
 
@@ -228,6 +239,8 @@ There are two account stages:
 The script does not silently switch Windows sessions after creating accounts. If `primary_setup_username` differs from the current logged-in user, the console warns the technician to sign out and sign in as the primary setup user before continuing or resuming.
 
 If an additional account `password_mode` is set to `random`, the toolkit only generates the password when `allow_random_password_export` is also `true`, because otherwise the credential would be lost. Generated password reports are sensitive and must be protected.
+
+`Send-DeploymentEmail.ps1` only ever attaches the run's `deployment-report-*.json`, `deployment-summary-*.md`, `asset-inventory-*.json`, and (if `attach_logs=true`) a zip of the run's log folder. It never attaches generated local-user password reports (`local-user-password-*.txt`), even though those live in the same `Deployment\Reports` folder. Point `smtp_config.json`'s `to_addresses`/`cc_addresses` at a trusted internal distribution list, since the log/report contents include device serials, computer names, and installed software.
 
 ## Autounattend
 
@@ -373,6 +386,30 @@ Configure each one in `Deployment\Config\local_apps.json`. Supported installer t
 
 Local installers are never run just because they exist. They must be explicitly configured with silent arguments and detection logic.
 
+## Local Deployment Handover (Eject The USB Early)
+
+By default the toolkit runs entirely from the USB for the whole deployment, exactly as before. Setting `local_deployment_handover.enabled=true` in `deployment_config.json` adds a `LocalHandover` step, which runs right after `Preflight` (once WiFi or Ethernet connectivity has been established) and before the computer name/local admin steps:
+
+1. Copies the entire `Deployment` folder (Config, Scripts, Apps, Drivers, Tools, and the current run's State/Logs/Reports) plus the USB-root `.env` to `local_deployment_handover.local_path` (default `C:\1S-WIN11`) using `robocopy`.
+2. Verifies the copy landed correctly, then switches the running deployment, its logging, and the resume scheduled task over to the local copy.
+3. Logs success and shows a toast confirming the USB can now be safely ejected.
+
+Every remaining step — computer name, local admin, power settings, Windows Updates, drivers, winget/local apps, Datto RMM, desktop cleanup, reports, and email — then runs from the local copy. If a reboot is required later in the run, the resume scheduled task and automatic logon both point at the local copy, not the USB, so ejecting it beforehand does not break resume.
+
+If no network connection is available yet when `LocalHandover` runs, the step is skipped (not failed) and the deployment simply continues entirely from the USB, same as with `local_deployment_handover.enabled=false`.
+
+This is disabled by default. Enable it once you are ready to have technicians eject the USB partway through a deployment and reuse it on the next device.
+
+## SMTP Email Notifications
+
+`Deployment\Config\smtp_config.json` (documented in `Deployment\Config\smtp_config.example.json.md`) controls emailing the deployment report, Markdown summary, asset inventory, and a zip of the run's logs to a distribution list. It is disabled by default.
+
+Once `smtp_server` and `to_addresses` are configured and `enabled=true`, email is sent by the `EmailReport` step (after `FinalReport`, before `Complete`) on a successful run, and from the top-level failure handler if the task sequence stops on an error. Both are controlled independently by `send_on_success`/`send_on_failure`.
+
+Email notification is best-effort: any SMTP failure is logged and does not stop or fail the deployment.
+
+The SMTP password uses the same `.env`/environment variable pattern as `OSIT_LOCAL_ADMIN_PASSWORD` and `OSIT_WIFI_PASSWORD` — see `OSIT_SMTP_PASSWORD` above.
+
 ## State, Logs, And Reports
 
 State is stored at:
@@ -403,6 +440,8 @@ Each run writes:
 - JSON deployment report.
 - Markdown deployment summary.
 - JSON asset inventory.
+
+All of the above are relative to the deployment root. If `local_deployment_handover` moves the deployment to `C:\1S-WIN11` (or your configured `local_path`), state, logs, and reports from that point on live under `C:\1S-WIN11\Deployment\...` instead of the USB, carried forward from whatever the USB already had at handover time.
 
 ## Resume And Reboot Handling
 
@@ -471,9 +510,10 @@ Key deployment moments show a Windows toast notification to the interactively lo
 7. Boot the target notebook from the USB.
 8. Install Windows 11 Pro using the technician-led setup flow, or let `wipe_repartition_drive=true` wipe and target disk 0 automatically.
 9. Let `Autounattend.xml` bypass OOBE network/account blocking and launch the deployment script.
-10. Follow prompts for computer name, local admin password, and any missing driver folder decision.
-11. Review the final report.
-12. Perform final customer onboarding manually: domain join, Entra join, Autopilot/Intune, customer apps, and handover steps.
+10. If `local_deployment_handover.enabled=true`, wait for the toast/console confirmation that files were copied to the local disk, then eject the USB.
+11. Follow prompts for computer name, local admin password, and any missing driver folder decision.
+12. Review the final report, delivered by email too if `smtp_config.json` is enabled.
+13. Perform final customer onboarding manually: domain join, Entra join, Autopilot/Intune, customer apps, and handover steps.
 
 ## Failure Behaviour
 

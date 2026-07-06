@@ -1,0 +1,19 @@
+{
+  "enabled": false,
+  "smtp_server": "",
+  "smtp_port": 587,
+  "encryption_mode": "starttls",
+  "username": "",
+  "password_env_var": "OSIT_SMTP_PASSWORD",
+  "from_address": "",
+  "from_display_name": "1S Windows 11 Deployment",
+  "to_addresses": [],
+  "cc_addresses": [],
+  "subject_prefix": "[Win11 Deployment]",
+  "send_on_success": true,
+  "send_on_failure": true,
+  "attach_reports": true,
+  "attach_logs": true,
+  "max_attachment_mb": 20,
+  "timeout_seconds": 30
+}

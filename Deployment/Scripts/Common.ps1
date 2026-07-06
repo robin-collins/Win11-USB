@@ -13,6 +13,7 @@ function Get-DeploymentSteps {
         'NetworkDrivers',
         'MspWifiSetup',
         'Preflight',
+        'LocalHandover',
         'ConfigureComputerName',
         'CreateLocalAdmin',
         'PowerSettings',
@@ -24,6 +25,7 @@ function Get-DeploymentSteps {
         'LocalApps',
         'DesktopItems',
         'FinalReport',
+        'EmailReport',
         'Complete'
     )
 }
@@ -117,6 +119,31 @@ function Get-DeploymentPaths {
         ConfigFile  = Join-Path $root 'Deployment\Config\deployment_config.json'
         WingetFile  = Join-Path $root 'Deployment\Config\winget_packages.json'
         LocalFile   = Join-Path $root 'Deployment\Config\local_apps.json'
+        SmtpFile    = Join-Path $root 'Deployment\Config\smtp_config.json'
+    }
+}
+
+function Get-DeploymentRoot {
+    [CmdletBinding()]
+    param([string]$VolumeLabel = $script:DeploymentVolumeLabel)
+
+    try {
+        return (Get-UsbRoot -VolumeLabel $VolumeLabel)
+    } catch {
+        # The USB may already have been ejected after a successful local deployment handover
+        # (see local_deployment_handover in deployment_config.json). $PSScriptRoot here is
+        # Common.ps1's own folder, i.e. "<root>\Deployment\Scripts" for whichever copy of the
+        # toolkit dot-sourced it, so it reliably identifies the root actually running even
+        # when the USB volume label can no longer be found.
+        $scriptsDir = $PSScriptRoot
+        if ($scriptsDir -and ((Split-Path -Leaf $scriptsDir) -ieq 'Scripts')) {
+            $candidateRoot = Split-Path -Parent (Split-Path -Parent $scriptsDir)
+            $candidateStateDir = Join-Path $candidateRoot 'Deployment\State'
+            if (Test-Path -LiteralPath $candidateStateDir -PathType Container) {
+                return $candidateRoot
+            }
+        }
+        throw
     }
 }
 
@@ -258,6 +285,11 @@ function Get-DefaultDeploymentConfig {
         install_local_apps               = $true
         install_offline_drivers          = $true
         install_network_drivers          = $true
+        local_deployment_handover        = @{
+            enabled = $false
+            local_path = 'C:\1S-WIN11'
+            require_network = $true
+        }
         stop_before_domain_join          = $true
         fail_on_missing_required_app     = $true
         fail_on_windows_home             = $true
@@ -861,7 +893,25 @@ function Register-DeploymentResumeTask {
     $userSid = Get-LocalAccountSid -Username $TriggerUsername
     $userId = if ($userSid) { $userSid } else { "$env:COMPUTERNAME\$TriggerUsername" }
 
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $resumeScript)
+    # If $UsbRoot is the actual removable USB volume, re-detecting it by label at resume time
+    # (the default when -UsbRoot is omitted) keeps working even if the USB's drive letter
+    # changes across reboots. But after a local deployment handover, $UsbRoot is a fixed local
+    # path (for example C:\1S-WIN11) rather than the USB, and the USB may be ejected by then,
+    # so that path must be passed explicitly instead of relying on volume-label lookup.
+    $isAutoDetectedUsbVolume = $false
+    try {
+        $labelRoot = (Resolve-Path -LiteralPath (Get-UsbRoot) -ErrorAction Stop).Path.TrimEnd('\')
+        $currentRoot = (Resolve-Path -LiteralPath $UsbRoot -ErrorAction Stop).Path.TrimEnd('\')
+        $isAutoDetectedUsbVolume = ($labelRoot -ieq $currentRoot)
+    } catch {
+        $isAutoDetectedUsbVolume = $false
+    }
+
+    $resumeArguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $resumeScript
+    if (-not $isAutoDetectedUsbVolume) {
+        $resumeArguments += (' -UsbRoot "{0}"' -f $UsbRoot)
+    }
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $resumeArguments
 
     # The AtLogOn trigger is the primary path (fires immediately once someone is logged on).
     # The recurring trigger is a backstop so the deployment resumes within a few minutes even
@@ -1145,6 +1195,68 @@ function Get-OsitWifiPassword {
         if ([string]::IsNullOrWhiteSpace($root)) { continue }
         $envPath = Join-Path $root '.env'
         $value = Get-DotEnvValue -Path $envPath -Name 'OSIT_WIFI_PASSWORD'
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+
+    return $null
+}
+
+function Get-DefaultSmtpConfig {
+    @{
+        enabled            = $false
+        smtp_server        = ''
+        smtp_port          = 587
+        encryption_mode    = 'starttls'
+        username           = ''
+        password_env_var   = 'OSIT_SMTP_PASSWORD'
+        from_address       = ''
+        from_display_name  = '1S Windows 11 Deployment'
+        to_addresses       = @()
+        cc_addresses       = @()
+        subject_prefix     = '[Win11 Deployment]'
+        send_on_success    = $true
+        send_on_failure    = $true
+        attach_reports     = $true
+        attach_logs        = $true
+        max_attachment_mb  = 20
+        timeout_seconds    = 30
+    }
+}
+
+function Get-SmtpConfig {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$UsbRoot)
+
+    $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
+    $default = Get-DefaultSmtpConfig
+    if (Test-Path -LiteralPath $paths.SmtpFile -PathType Leaf) {
+        return Merge-Config -Base $default -Override (Read-JsonFile -Path $paths.SmtpFile -Required)
+    }
+    $example = Join-Path $paths.Config 'smtp_config.example.json'
+    if (Test-Path -LiteralPath $example -PathType Leaf) {
+        return Merge-Config -Base $default -Override (Read-JsonFile -Path $example -Required)
+    }
+    return $default
+}
+
+function Get-OsitSmtpPassword {
+    [CmdletBinding()]
+    param(
+        [string[]]$SearchRoots = @(),
+        [string]$EnvVarName = 'OSIT_SMTP_PASSWORD'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($EnvVarName)) { $EnvVarName = 'OSIT_SMTP_PASSWORD' }
+
+    foreach ($target in @('Process', 'User', 'Machine')) {
+        $value = [Environment]::GetEnvironmentVariable($EnvVarName, $target)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+
+    foreach ($root in $SearchRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $envPath = Join-Path $root '.env'
+        $value = Get-DotEnvValue -Path $envPath -Name $EnvVarName
         if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
     }
 
