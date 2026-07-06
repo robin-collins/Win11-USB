@@ -5,9 +5,22 @@
   "windows_update_max_cycles": 5,
   "computer_name_mode": "prompt",
   "computer_name_prefix": "NB",
-  "create_local_admin": true,
-  "local_admin_username": "LocalAdmin",
-  "local_admin_password_mode": "prompt",
+  "primary_setup_username": "OSIT",
+  "osit_local_admin_username": "OSIT",
+  "osit_local_admin_full_name": "OSIT Local Administrator",
+  "osit_local_admin_description": "Primary OSIT local administrator account",
+  "additional_local_users": [
+    {
+      "username": "TechSupport",
+      "full_name": "Technician Support",
+      "description": "Optional technician support account",
+      "groups": [ "Administrators" ],
+      "password_mode": "prompt",
+      "password_never_expires": true,
+      "enabled": false,
+      "primary_setup_user": false
+    }
+  ],
   "allow_random_password_export": false,
   "install_winget_apps": true,
   "install_local_apps": true,

@@ -1,0 +1,27 @@
+.env
+.env.*
+!/.env.example
+
+# Generated unattend files may contain local administrator passwords.
+Autounattend.generated.xml
+Autounattend.local.xml
+
+# Deployment runtime output
+Deployment/State/*.json
+Deployment/State/*.bak
+Deployment/State/*.archive-*.json
+Deployment/Logs/*
+!Deployment/Logs/.gitkeep
+Deployment/Reports/*
+!Deployment/Reports/.gitkeep
+
+# Local app and driver payloads are usually large and site-specific.
+Deployment/Apps/Local/*
+!Deployment/Apps/Local/.gitkeep
+Deployment/Apps/Winget/*
+!Deployment/Apps/Winget/.gitkeep
+Deployment/Drivers/*/*
+!Deployment/Drivers/Dell/.gitkeep
+!Deployment/Drivers/HP/.gitkeep
+!Deployment/Drivers/Lenovo/.gitkeep
+!Deployment/Drivers/Generic/.gitkeep

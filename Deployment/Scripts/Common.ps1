@@ -160,9 +160,11 @@ function Get-DefaultDeploymentConfig {
         windows_update_max_cycles        = 5
         computer_name_mode               = 'prompt'
         computer_name_prefix             = 'NB'
-        create_local_admin               = $true
-        local_admin_username             = 'LocalAdmin'
-        local_admin_password_mode        = 'prompt'
+        primary_setup_username           = 'OSIT'
+        osit_local_admin_username        = 'OSIT'
+        osit_local_admin_full_name       = 'OSIT Local Administrator'
+        osit_local_admin_description     = 'Primary OSIT local administrator account'
+        additional_local_users           = @()
         allow_random_password_export     = $false
         install_winget_apps              = $true
         install_local_apps               = $true
@@ -712,6 +714,58 @@ function New-RandomPassword {
 
     Add-Type -AssemblyName System.Web
     return [System.Web.Security.Membership]::GeneratePassword($Length, 4)
+}
+
+function ConvertFrom-SecureStringToPlainText {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][securestring]$SecureString)
+
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+    }
+}
+
+function Get-DotEnvValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    foreach ($line in Get-Content -LiteralPath $Path -ErrorAction Stop) {
+        if ($line -match '^\s*#' -or [string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line -match "^\s*$([regex]::Escape($Name))\s*=\s*(.*)\s*$") {
+            $value = $Matches[1].Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            return $value
+        }
+    }
+    return $null
+}
+
+function Get-OsitLocalAdminPassword {
+    [CmdletBinding()]
+    param([string[]]$SearchRoots = @())
+
+    foreach ($target in @('Process', 'User', 'Machine')) {
+        $value = [Environment]::GetEnvironmentVariable('OSIT_LOCAL_ADMIN_PASSWORD', $target)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+
+    foreach ($root in $SearchRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $envPath = Join-Path $root '.env'
+        $value = Get-DotEnvValue -Path $envPath -Name 'OSIT_LOCAL_ADMIN_PASSWORD'
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+
+    return $null
 }
 
 function Get-DeploymentReportRoot {

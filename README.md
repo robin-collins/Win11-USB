@@ -6,14 +6,14 @@ It is designed for technician-led notebook deployment. It automates Windows setu
 
 ## What The Technician Sees
 
-The technician boots from the USB, completes the normal Windows disk/install choices, then signs in with the temporary deployment admin created by `Autounattend.xml`. The deployment console opens, checks prerequisites first, prompts only where a decision is needed, writes progress after every successful step, and stops with a report saying the device is ready for final customer onboarding.
+The technician boots from the USB, completes the normal Windows disk/install choices, then signs in with the OSIT local admin created by `Autounattend.xml`. The deployment console opens, checks prerequisites first, prompts only where a decision is needed, writes progress after every successful step, and stops with a report saying the device is ready for final customer onboarding.
 
 ```mermaid
 flowchart TD
   A["Boot from USB labelled 1S-WIN11"] --> B["Windows setup runs with Autounattend.xml"]
   B --> C["Technician completes disk and install choices"]
   C --> D["OOBE network and account blocks are bypassed"]
-  D --> E["DeployAdmin logs on once"]
+  D --> E["OSIT logs on once"]
   E --> F["Start-Deployment.ps1 opens from the USB"]
   F --> G["Preflight checks"]
   G --> H["Computer name and local admin prompts if configured"]
@@ -101,20 +101,53 @@ Important `deployment_config.json` options:
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
-- `create_local_admin`: creates a configured local admin during the task sequence.
-- `local_admin_password_mode`: `prompt` or `random`.
+- `osit_local_admin_username`: defaults to `OSIT`. This is the always-present primary local admin.
+- `primary_setup_username`: defaults to `OSIT`.
+- `additional_local_users`: creates optional extra local accounts. Each entry supports `username`, `full_name`, `description`, `groups`, `password_mode`, `password_never_expires`, `enabled`, and `primary_setup_user`.
 - `install_winget_apps`, `install_local_apps`, `install_offline_drivers`: enable or skip those phases.
 - `stop_before_domain_join`: documents the intended stopping point. The scripts do not perform customer identity joins.
 
 Do not store customer domain credentials in any config file.
 
+The OSIT password is not stored in `deployment_config.json`. `Initialize-UsbDeployment.ps1` reads it from either:
+
+- environment variable: `OSIT_LOCAL_ADMIN_PASSWORD`
+- `.env` in the toolkit folder: `OSIT_LOCAL_ADMIN_PASSWORD=...`
+
+If neither exists, `Initialize-UsbDeployment.ps1` prompts to create one.
+
+Example additional local account config:
+
+```json
+"primary_setup_username": "OSIT",
+"additional_local_users": [
+  {
+    "username": "TechSupport",
+    "full_name": "Technician Support",
+    "description": "Optional technician support account",
+    "groups": [ "Administrators" ],
+    "password_mode": "prompt",
+    "password_never_expires": true,
+    "enabled": true,
+    "primary_setup_user": false
+  }
+]
+```
+
 ## Security Notes
 
-`Autounattend.xml` creates a temporary first-logon technician account named `DeployAdmin` with the default password `TempDeploy!ChangeMe11`.
+`Autounattend.xml` creates the OSIT local administrator account and auto-logs it on once to start the deployment console.
 
-Before production use, change this password in `Autounattend.xml`, protect physical access to the USB, and remove or disable the temporary account during final onboarding. The deployment task sequence can also create a separate local administrator account from `deployment_config.json`; the default mode prompts the technician for that password instead of storing it in a script.
+The repository `Autounattend.xml` contains the placeholder `__OSIT_LOCAL_ADMIN_PASSWORD__`. `Initialize-UsbDeployment.ps1` replaces that placeholder when writing the USB-root `Autounattend.xml`. The generated USB answer file contains the OSIT password in plaintext because Windows setup requires it for local account creation and auto-logon. Protect physical access to the USB.
 
-If `local_admin_password_mode` is set to `random`, the toolkit only generates the password when `allow_random_password_export` is also `true`, because otherwise the credential would be lost. Generated password reports are sensitive and must be protected.
+There are two account stages:
+
+- `Autounattend.xml`: controls the always-present OSIT account that logs in first and launches the deployment console.
+- `Deployment\Config\deployment_config.json`: controls optional extra accounts. Use `additional_local_users` only when accounts beyond OSIT are required.
+
+The script does not silently switch Windows sessions after creating accounts. If `primary_setup_username` differs from the current logged-in user, the console warns the technician to sign out and sign in as the primary setup user before continuing or resuming.
+
+If an additional account `password_mode` is set to `random`, the toolkit only generates the password when `allow_random_password_export` is also `true`, because otherwise the credential would be lost. Generated password reports are sensitive and must be protected.
 
 ## Autounattend
 
@@ -125,7 +158,7 @@ The provided file:
 - does not partition or wipe disks.
 - sets OOBE options to avoid Microsoft account and network blocking prompts.
 - writes the Windows 11 `BypassNRO` registry value during setup instead of requiring `Shift+F10` and `oobe\BypassNRO.cmd`.
-- creates the temporary `DeployAdmin` local administrator.
+- creates the `OSIT` local administrator.
 - auto-logs on once and starts `Deployment\Scripts\Start-Deployment.ps1` from the USB found by label.
 
 Disk selection, deletion, partitioning, and image selection remain technician-led. If you want destructive disk partitioning, keep it in a separate answer file and treat it as a deliberate site-specific change.

@@ -128,6 +128,116 @@ function Invoke-ComputerNameStep {
     Request-DeploymentReboot -UsbRoot $UsbRoot -State $State -StatePath $StatePath -Reason "Computer rename to $desired requires reboot."
 }
 
+function Get-ConfigValue {
+    param(
+        [hashtable]$Hash,
+        [string]$Key,
+        [object]$Default = $null
+    )
+
+    if ($Hash -and $Hash.ContainsKey($Key) -and $null -ne $Hash[$Key]) { return $Hash[$Key] }
+    return $Default
+}
+
+function Get-LocalUserDefinitions {
+    param([hashtable]$Config)
+
+    $ositUsername = [string](Get-ConfigValue -Hash $Config -Key 'osit_local_admin_username' -Default 'OSIT')
+    $users = @(@{
+            username               = $ositUsername
+            full_name              = [string](Get-ConfigValue -Hash $Config -Key 'osit_local_admin_full_name' -Default 'OSIT Local Administrator')
+            description            = [string](Get-ConfigValue -Hash $Config -Key 'osit_local_admin_description' -Default 'Primary OSIT local administrator account')
+            groups                 = @('Administrators')
+            password_mode          = 'osit_secret'
+            password_never_expires = $true
+            enabled                = $true
+            primary_setup_user     = $true
+        })
+
+    $additionalUsers = @()
+    if ($Config.ContainsKey('additional_local_users') -and $null -ne $Config.additional_local_users) {
+        $additionalUsers = @($Config.additional_local_users)
+    } elseif ($Config.ContainsKey('local_users') -and $null -ne $Config.local_users) {
+        Write-Log -Level Warn -Message 'Config key local_users is deprecated. Rename it to additional_local_users. OSIT is now always the base local admin account.'
+        $additionalUsers = @($Config.local_users)
+    }
+
+    foreach ($user in $additionalUsers) {
+        $entry = ConvertTo-PlainHashtable $user
+        if ($entry.ContainsKey('enabled') -and -not [bool]$entry.enabled) { continue }
+        if ([string]$entry.username -ieq $ositUsername) {
+            Write-Log -Level Warn -Message "Ignoring additional_local_users entry for $ositUsername because OSIT is managed as the base account."
+            continue
+        }
+        $users += ,$entry
+    }
+
+    return $users
+}
+
+function New-ConfiguredLocalUserPassword {
+    param(
+        [hashtable]$Account,
+        [hashtable]$Config,
+        [hashtable]$State,
+        [string]$UsbRoot
+    )
+
+    $username = [string]$Account.username
+    $mode = ([string](Get-ConfigValue -Hash $Account -Key 'password_mode' -Default 'prompt')).ToLowerInvariant()
+    if ($mode -eq 'osit_secret') {
+        $passwordValue = Get-OsitLocalAdminPassword -SearchRoots @($UsbRoot)
+        if ([string]::IsNullOrWhiteSpace($passwordValue)) {
+            throw "OSIT_LOCAL_ADMIN_PASSWORD was not found in environment variables or USB-root .env. Run Initialize-UsbDeployment.ps1 to prepare the USB."
+        }
+        return (ConvertTo-SecureString -String $passwordValue -AsPlainText -Force)
+    }
+
+    if ($mode -eq 'prompt') {
+        return (Read-Host "Enter password for local user '$username'" -AsSecureString)
+    }
+
+    if ($mode -eq 'random') {
+        if (-not [bool]$Config.allow_random_password_export) {
+            throw "password_mode=random for '$username' requires allow_random_password_export=true so the generated credential is not lost."
+        }
+        $plain = New-RandomPassword -Length 22
+        $password = ConvertTo-SecureString -String $plain -AsPlainText -Force
+        $reportRoot = Get-DeploymentReportRoot -UsbRoot $UsbRoot
+        $passwordPath = Join-Path $reportRoot ("local-user-password-{0}-{1}.txt" -f (Get-SafeName -Value $username), $State.deployment_run_id)
+        Set-Content -LiteralPath $passwordPath -Value @(
+            "Username: $username",
+            "Password: $plain",
+            "Generated: $((Get-Date).ToString('o'))",
+            'Rotate this password during final customer onboarding.'
+        ) -Encoding UTF8 -Force
+        Write-Log -Level Warn -Message "Generated password for $username was written to $passwordPath. Treat this file as sensitive."
+        return $password
+    }
+
+    throw "Unsupported password_mode '$mode' for local user '$username'. Valid values: prompt, random."
+}
+
+function Add-UserToConfiguredGroups {
+    param(
+        [string]$Username,
+        [object[]]$Groups
+    )
+
+    foreach ($group in @($Groups)) {
+        $groupName = [string]$group
+        if ([string]::IsNullOrWhiteSpace($groupName)) { continue }
+        $members = @(Get-LocalGroupMember -Group $groupName -ErrorAction Stop | Select-Object -ExpandProperty Name)
+        $localName = "$env:COMPUTERNAME\$Username"
+        if ($members -notcontains $localName -and $members -notcontains $Username) {
+            Add-LocalGroupMember -Group $groupName -Member $Username -ErrorAction Stop
+            Write-Log -Level Success -Message "$Username was added to local group $groupName."
+        } else {
+            Write-Log -Level Success -Message "$Username is already a member of local group $groupName."
+        }
+    }
+}
+
 function Invoke-CreateLocalAdminStep {
     param(
         [string]$UsbRoot,
@@ -136,52 +246,62 @@ function Invoke-CreateLocalAdminStep {
         [hashtable]$Config
     )
 
-    if (-not [bool]$Config.create_local_admin) {
-        Write-Log -Level Info -Message 'Local administrator creation is disabled by config.'
+    $accounts = @(Get-LocalUserDefinitions -Config $Config)
+    if ($accounts.Count -eq 0) {
+        Write-Log -Level Info -Message 'Local user creation is disabled by config.'
         return
     }
 
-    $username = [string]$Config.local_admin_username
-    if ([string]::IsNullOrWhiteSpace($username)) { throw 'local_admin_username must not be empty when create_local_admin is true.' }
-    $existing = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-    if ($existing) {
-        Write-Log -Level Success -Message "Local user $username already exists."
-    } else {
-        $mode = ([string]$Config.local_admin_password_mode).ToLowerInvariant()
-        $password = $null
-        if ($mode -eq 'prompt') {
-            $password = Read-Host "Enter password for local administrator '$username'" -AsSecureString
-        } elseif ($mode -eq 'random') {
-            if (-not [bool]$Config.allow_random_password_export) {
-                throw 'local_admin_password_mode=random requires allow_random_password_export=true so the generated credential is not lost.'
-            }
-            $plain = New-RandomPassword -Length 22
-            $password = ConvertTo-SecureString -String $plain -AsPlainText -Force
-            $reportRoot = Get-DeploymentReportRoot -UsbRoot $UsbRoot
-            $passwordPath = Join-Path $reportRoot "local-admin-password-$($State.deployment_run_id).txt"
-            Set-Content -LiteralPath $passwordPath -Value @(
-                "Username: $username",
-                "Password: $plain",
-                "Generated: $((Get-Date).ToString('o'))",
-                'Rotate this password during final customer onboarding.'
-            ) -Encoding UTF8 -Force
-            Write-Log -Level Warn -Message "Generated local admin password was written to $passwordPath. Treat this file as sensitive."
+    $primary = [string](Get-ConfigValue -Hash $Config -Key 'primary_setup_username' -Default '')
+    if ([string]::IsNullOrWhiteSpace($primary)) {
+        $markedPrimary = @($accounts | Where-Object { $_.ContainsKey('primary_setup_user') -and [bool]$_.primary_setup_user } | Select-Object -First 1)
+        if ($markedPrimary.Count -gt 0) { $primary = [string]$markedPrimary[0].username }
+    }
+    if ([string]::IsNullOrWhiteSpace($primary) -and $accounts.Count -eq 1) { $primary = [string]$accounts[0].username }
+
+    $createdUsers = @()
+    foreach ($account in $accounts) {
+        $username = [string](Get-ConfigValue -Hash $account -Key 'username' -Default '')
+        if ([string]::IsNullOrWhiteSpace($username)) { throw 'Each additional_local_users entry must include username.' }
+
+        $groups = @(Get-ConfigValue -Hash $account -Key 'groups' -Default @('Administrators'))
+        if ($groups.Count -eq 0) { $groups = @('Users') }
+        $description = [string](Get-ConfigValue -Hash $account -Key 'description' -Default '')
+        $fullName = [string](Get-ConfigValue -Hash $account -Key 'full_name' -Default $username)
+        $passwordNeverExpires = [bool](Get-ConfigValue -Hash $account -Key 'password_never_expires' -Default $true)
+
+        $existing = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+        if ($existing) {
+            Write-Log -Level Success -Message "Local user $username already exists."
         } else {
-            throw "Unsupported local_admin_password_mode '$mode'. Valid values: prompt, random."
+            $password = New-ConfiguredLocalUserPassword -Account $account -Config $Config -State $State -UsbRoot $UsbRoot
+            New-LocalUser -Name $username -Password $password -FullName $fullName -Description $description -PasswordNeverExpires:$passwordNeverExpires -ErrorAction Stop | Out-Null
+            Write-Log -Level Success -Message "Local user $username was created."
         }
 
-        New-LocalUser -Name $username -Password $password -FullName $username -Description ([string]$Config.local_admin_description) -PasswordNeverExpires:$true -ErrorAction Stop | Out-Null
-        Write-Log -Level Success -Message "Local user $username was created."
+        Add-UserToConfiguredGroups -Username $username -Groups $groups
+        $createdUsers += ,([ordered]@{
+                username = $username
+                groups   = $groups
+                primary_setup_user = ($username -ieq $primary)
+            })
     }
 
-    $members = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | Select-Object -ExpandProperty Name)
-    $localName = "$env:COMPUTERNAME\$username"
-    if ($members -notcontains $localName -and $members -notcontains $username) {
-        Add-LocalGroupMember -Group 'Administrators' -Member $username -ErrorAction Stop
-        Write-Log -Level Success -Message "$username was added to the local Administrators group."
-    } else {
-        Write-Log -Level Success -Message "$username is already a local administrator."
+    if (-not [string]::IsNullOrWhiteSpace($primary)) {
+        if (-not ($createdUsers | Where-Object { $_.username -ieq $primary })) {
+            throw "primary_setup_username '$primary' does not match OSIT or any enabled additional_local_users entry."
+        }
+        $State.primary_setup_username = $primary
+        Write-DeploymentState -State $State -StatePath $StatePath
+        Write-Log -Level Info -Message "Primary setup user is configured as $primary."
+        if ($env:USERNAME -ine $primary) {
+            Write-Log -Level Warn -Message "Current session is running as $env:USERNAME. To continue under primary setup user $primary, sign out and sign in as $primary, then rerun Resume-Deployment.ps1 or Start-Deployment.ps1."
+        }
     }
+
+    $State.local_users = $createdUsers
+    Write-DeploymentState -State $State -StatePath $StatePath
+    Write-StructuredLog -Level Info -Message 'Local user configuration completed' -Data $createdUsers
 }
 
 function Invoke-DeploymentStep {

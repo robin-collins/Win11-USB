@@ -36,12 +36,12 @@
       <UserAccounts>
         <LocalAccounts>
           <LocalAccount wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-            <Name>DeployAdmin</Name>
-            <DisplayName>Deployment Administrator</DisplayName>
+            <Name>OSIT</Name>
+            <DisplayName>OSIT Local Administrator</DisplayName>
             <Group>Administrators</Group>
-            <Description>Temporary technician account for Windows deployment</Description>
+            <Description>Primary OSIT local administrator account</Description>
             <Password>
-              <Value>TempDeploy!ChangeMe11</Value>
+              <Value>__OSIT_LOCAL_ADMIN_PASSWORD__</Value>
               <PlainText>true</PlainText>
             </Password>
           </LocalAccount>
@@ -50,9 +50,9 @@
       <AutoLogon>
         <Enabled>true</Enabled>
         <LogonCount>1</LogonCount>
-        <Username>DeployAdmin</Username>
+        <Username>OSIT</Username>
         <Password>
-          <Value>TempDeploy!ChangeMe11</Value>
+          <Value>__OSIT_LOCAL_ADMIN_PASSWORD__</Value>
           <PlainText>true</PlainText>
         </Password>
       </AutoLogon>
