@@ -269,7 +269,7 @@ function Get-PowerCfgTimeoutMinutes {
             `powercfg /query` text output and returns the value in minutes (the raw value is
             seconds). Returns $null if that line is not present in -QueryOutput. Pure function.
     #>
-    [OutputType([Nullable[int]])]
+    [OutputType([int])]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$QueryOutput,
@@ -319,7 +319,7 @@ function Get-RehearsalExpectedLocalUsernames {
             Start-Deployment.ps1's own Get-LocalUserDefinitions filtering logic (enabled entries
             only, OSIT itself never duplicated even if also listed in additional_local_users).
     #>
-    [OutputType([string[]])]
+    [OutputType([System.Object[]])]
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][hashtable]$MergedConfig)
 
@@ -352,7 +352,7 @@ function Get-RehearsalUnexpectedLocalUsernames {
             Returns which of -ActualUsernames are neither in -ExpectedUsernames nor a known
             Windows built-in account. Pure function (simple set difference).
     #>
-    [OutputType([string[]])]
+    [OutputType([System.Object[]])]
     [CmdletBinding()]
     param(
         [string[]]$ActualUsernames = @(),
@@ -436,6 +436,7 @@ function Get-RehearsalArtifactFileAssertions {
             absent/false" assertion results from an already-gathered Get-RehearsalArtifactFacts
             fact set. Pure function given -Facts (no I/O of its own).
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSReviewUnusedParameter', 'Facts', Justification = 'Referenced inside each Test-RehearsalAssertion -ScriptBlock below via closure capture; PSScriptAnalyzer''s static analysis does not trace variable usage into nested scriptblock literals.')]
     [OutputType([System.Object[]])]
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][hashtable]$Facts)
@@ -749,6 +750,7 @@ function Test-RehearsalResult {
             UNVERIFIED ON REAL HYPER-V: ties together every Get-RehearsalGuest*Facts function,
             all of which require a real Windows Hyper-V host with a live, reachable guest.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSReviewUnusedParameter', 'PartitionSizeTolerancePercent', Justification = 'Referenced inside the disk-layout Test-RehearsalAssertion -ScriptBlock further down via closure capture; PSScriptAnalyzer''s static analysis does not trace variable usage into nested scriptblock literals.')]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
     [CmdletBinding()]
     param(

@@ -72,6 +72,7 @@
 #>
 
 [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'This is an interactive bench-technician CLI harness entry point; the colored console progress/plan output is the primary UX for the person driving a rehearsal run, alongside the structured artifacts written under Test\Rehearsal\Artifacts.')]
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification = 'Building the PSCredential passed to Invoke-RehearsalMonitoring for PowerShell Direct: media.OsitPassword is a fresh, harness-generated rehearsal-only password (New-RehearsalMedia), never technician/user-typed input, so ConvertTo-SecureString is the required bridge into New-Object PSCredential, not a security downgrade.')]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
