@@ -32,6 +32,17 @@ if ! pwsh -NoLogo -NoProfile -Command "if (-not (Get-Module -ListAvailable -Name
   echo "Installing PSScriptAnalyzer from the PowerShell Gallery..."
   pwsh -NoLogo -NoProfile -Command "
     Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
-    Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+    Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop && Import-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
   " || echo "WARNING: could not install PSScriptAnalyzer (PowerShell Gallery is unreachable from this environment's network policy)." >&2
+fi
+
+# Pester ships from the PowerShell Gallery, which this sandbox's
+# network policy also blocks. Try anyway (in case the policy differs
+# elsewhere), but don't fail the session if it's unreachable.
+if ! pwsh -NoLogo -NoProfile -Command "if (-not (Get-Module -ListAvailable -Name Pester)) { exit 1 }" 2>/dev/null; then
+  echo "Installing Pester from the PowerShell Gallery..."
+  pwsh -NoLogo -NoProfile -Command "
+    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+    Install-Module -Name Pester -Scope CurrentUser -Force -ErrorAction Stop && Import-Module -Name Pester -Scope CurrentUser -Force -ErrorAction Stop
+  " || echo "WARNING: could not install Pester (PowerShell Gallery is unreachable from this environment's network policy)." >&2
 fi
