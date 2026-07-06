@@ -36,3 +36,14 @@ Deployment/Drivers/*/*
 !Deployment/Drivers/Network/*/
 Deployment/Drivers/Network/*/*
 !Deployment/Drivers/Network/*/.gitkeep
+
+# Hyper-V rehearsal harness (Test\Rehearsal, Tier 1) is host-side only and never ships on the
+# USB. Per-run scratch state, harvested artifacts, and rehearsal secrets must never be
+# committed; the bench technician's own working directory (default
+# %TEMP%\DeploymentRehearsal) already lives outside the repo, but anything the harness writes
+# under the repo tree itself is excluded here.
+Test/Rehearsal/Artifacts/*
+!Test/Rehearsal/Artifacts/.gitkeep
+Test/Rehearsal/.working/
+Test/Rehearsal/**/.env
+Test/Rehearsal/**/*.env
