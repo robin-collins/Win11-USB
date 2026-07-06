@@ -137,6 +137,10 @@ function New-WindowsPeArtifacts {
     param([hashtable]$Config)
 
     if (-not [bool]$Config.wipe_repartition_drive) {
+        Write-Host ''
+        Write-Host 'wipe_repartition_drive is FALSE: the generated Autounattend.xml will NOT wipe or partition any disk.' -ForegroundColor Yellow
+        Write-Host 'Windows Setup will require technician-led language, disk, and image selection.' -ForegroundColor Yellow
+        Write-Host 'To enable automatic wipe/partitioning, set wipe_repartition_drive=true in Deployment\Config\deployment_config.json in this toolkit folder BEFORE running this script, then rerun it.' -ForegroundColor Yellow
         return @{ SettingsBlock = ''; DiskPartScript = $null }
     }
 
@@ -383,6 +387,26 @@ if (-not $SkipCopy) {
     }
     if (Test-Path -LiteralPath $targetDiskPartLog -PathType Leaf) {
         Remove-Item -LiteralPath $targetDiskPartLog -Force -ErrorAction SilentlyContinue
+    }
+
+    # Validate what actually landed on the USB against the same config used to generate it,
+    # so a config/answer-file mismatch fails here instead of at boot on a customer machine.
+    $validator = Join-Path $sourceRoot 'Validate-Unattend.ps1'
+    if ((Test-Path -LiteralPath $validator -PathType Leaf) -and (Test-Path -LiteralPath $targetAutounattend -PathType Leaf)) {
+        Write-Host ''
+        Write-Host 'Validating the generated USB Autounattend.xml...' -ForegroundColor Cyan
+        & $validator -Path $targetAutounattend -Generated -ConfigPath (Join-Path $sourceRoot 'Deployment\Config\deployment_config.json')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Generated USB Autounattend.xml failed validation. Fix Deployment\Config\deployment_config.json or the template, then rerun Initialize-UsbDeployment.ps1.'
+        }
+    }
+
+    if ($null -ne $windowsPe.DiskPartScript) {
+        Write-Host ''
+        Write-Host "REMINDER: this USB will WIPE disk $([int]$deploymentConfig.wipe_repartition_disk_id) automatically when a machine boots from it." -ForegroundColor Yellow
+    } else {
+        Write-Host ''
+        Write-Host 'This USB performs technician-led disk setup (no automatic wipe).' -ForegroundColor Yellow
     }
 
     if (-not [string]::IsNullOrWhiteSpace($wifiPassword)) {

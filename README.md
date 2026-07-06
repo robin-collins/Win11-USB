@@ -80,6 +80,8 @@ The toolkit always finds the USB by volume label `1S-WIN11`, not by drive letter
 
 ## Initialise Or Update The USB
 
+**Edit `Deployment\Config\deployment_config.json` in this toolkit folder BEFORE running `Initialize-UsbDeployment.ps1`.** Settings such as `wipe_repartition_drive`, partition sizes, and `windows_image_name` are baked into the generated USB `Autounattend.xml` at initialise time. Changing the config afterwards has no effect until you rerun `Initialize-UsbDeployment.ps1`. The initializer validates the generated answer file against the config and fails if they do not match.
+
 From an elevated PowerShell prompt on an admin workstation:
 
 ```powershell
@@ -399,8 +401,8 @@ To force a new run:
 
 1. Create a Windows 11 USB with Microsoft `mediacreationtool.exe`.
 2. Set the USB volume label to `1S-WIN11`.
-3. Copy this toolkit to the USB root or run `Initialize-UsbDeployment.ps1`.
-4. Edit config files under `Deployment\Config`.
+3. Edit config files under `Deployment\Config` in this toolkit folder first, especially `wipe_repartition_drive`. These values are baked into the generated USB answer file in the next step.
+4. Run `Initialize-UsbDeployment.ps1` to write the toolkit and generated `Autounattend.xml` to the USB. Rerun it after any config change.
 5. Add model drivers under `Deployment\Drivers\<Manufacturer>\<Model>` when available.
 6. Add configured local installers under `Deployment\Apps\Local`.
 7. Boot the target notebook from the USB.
