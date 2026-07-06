@@ -13,14 +13,14 @@ function ConvertTo-PlainHashtable {
     process {
         if ($null -eq $InputObject) { return $null }
         if ($InputObject -is [System.Collections.IDictionary]) {
-            $hash = [ordered]@{}
+            $hash = @{}
             foreach ($key in $InputObject.Keys) {
                 $hash[$key] = ConvertTo-PlainHashtable $InputObject[$key]
             }
             return $hash
         }
         if ($InputObject -is [System.Management.Automation.PSCustomObject]) {
-            $hash = [ordered]@{}
+            $hash = @{}
             foreach ($property in $InputObject.PSObject.Properties) {
                 $hash[$property.Name] = ConvertTo-PlainHashtable $property.Value
             }
@@ -78,7 +78,7 @@ function Get-DeploymentPaths {
     param([Parameter(Mandatory = $true)][string]$UsbRoot)
 
     $root = (Resolve-Path -LiteralPath $UsbRoot -ErrorAction Stop).Path
-    [ordered]@{
+    @{
         UsbRoot     = $root
         Deployment  = Join-Path $root 'Deployment'
         Config      = Join-Path $root 'Deployment\Config'
@@ -153,7 +153,7 @@ function Write-JsonFile {
 }
 
 function Get-DefaultDeploymentConfig {
-    [ordered]@{
+    @{
         minimum_free_space_gb            = 25
         require_ac_power                 = $true
         require_internet                 = $true
@@ -186,7 +186,7 @@ function Merge-Config {
         [Parameter(Mandatory = $true)][hashtable]$Override
     )
 
-    $merged = [ordered]@{}
+    $merged = @{}
     foreach ($key in $Base.Keys) { $merged[$key] = $Base[$key] }
     foreach ($key in $Override.Keys) { $merged[$key] = $Override[$key] }
     return $merged
@@ -276,7 +276,7 @@ function Get-DeviceIdentity {
     $product = Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction SilentlyContinue
     $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
 
-    [ordered]@{
+    @{
         serial_number = if ($bios) { [string]$bios.SerialNumber } else { '' }
         uuid          = if ($product) { [string]$product.UUID } else { '' }
         computer_name = $env:COMPUTERNAME
@@ -297,7 +297,7 @@ function New-DeploymentState {
     param([string]$RunId)
 
     $identity = Get-DeviceIdentity
-    [ordered]@{
+    @{
         device_serial_number = $identity.serial_number
         device_uuid          = $identity.uuid
         computer_name        = $identity.computer_name
@@ -542,6 +542,23 @@ function Invoke-ExternalCommand {
         throw "Command failed with exit code $($process.ExitCode): $FilePath $argumentLine`n$stderr"
     }
     return $result
+}
+
+function Split-CommandLineArguments {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$ArgumentString)
+
+    if ([string]::IsNullOrWhiteSpace($ArgumentString)) { return @() }
+    $matches = [regex]::Matches($ArgumentString, '("[^"]*"|''[^'']*''|\S+)')
+    $args = @()
+    foreach ($match in $matches) {
+        $value = $match.Value
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        $args += $value
+    }
+    return $args
 }
 
 function Test-InternetConnectivity {

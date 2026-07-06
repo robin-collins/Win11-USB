@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>1</Order>
+          <Path>cmd.exe /c reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+          <Description>Bypass Windows 11 network requirement during OOBE</Description>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>2</Order>
+          <Path>cmd.exe /c reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v DisablePrivacyExperience /t REG_DWORD /d 1 /f</Path>
+          <Description>Reduce OOBE prompts for technician-led deployment</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>en-AU</InputLocale>
+      <SystemLocale>en-AU</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-AU</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+            <Name>DeployAdmin</Name>
+            <DisplayName>Deployment Administrator</DisplayName>
+            <Group>Administrators</Group>
+            <Description>Temporary technician account for Windows deployment</Description>
+            <Password>
+              <Value>TempDeploy!ChangeMe11</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <LogonCount>1</LogonCount>
+        <Username>DeployAdmin</Username>
+        <Password>
+          <Value>TempDeploy!ChangeMe11</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>1</Order>
+          <Description>Start 1S Windows 11 deployment task sequence from USB</Description>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$v=Get-CimInstance Win32_Volume -Filter 'Label=''1S-WIN11''' | Where-Object DriveLetter | Select-Object -First 1; if(-not $v){throw 'Deployment USB 1S-WIN11 not found'}; $p=Join-Path $v.DriveLetter 'Deployment\Scripts\Start-Deployment.ps1'; Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$p) -Verb RunAs -Wait"</CommandLine>
+          <RequiresUserInput>true</RequiresUserInput>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+      <TimeZone>Cen. Australia Standard Time</TimeZone>
+    </component>
+  </settings>
+  <cpi:offlineImage cpi:source="wim://sources/install.wim#Windows 11 Pro" xmlns:cpi="urn:schemas-microsoft-com:cpi" />
+</unattend>
