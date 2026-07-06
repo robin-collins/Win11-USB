@@ -443,6 +443,44 @@ Each run writes:
 
 All of the above are relative to the deployment root. If `local_deployment_handover` moves the deployment to `C:\1S-WIN11` (or your configured `local_path`), state, logs, and reports from that point on live under `C:\1S-WIN11\Deployment\...` instead of the USB, carried forward from whatever the USB already had at handover time.
 
+## Dry Run
+
+`-DryRun` runs the entire orchestrator, in order, on any machine with the toolkit checked out, and logs exactly what each step *would* do without changing anything. Use it:
+
+- after editing `deployment_config.json` or any other config/profile file, as a sanity check that the new settings parse and drive the steps the way you expect.
+- before running `Initialize-UsbDeployment.ps1` against a real USB, to catch a configuration mistake cheaply.
+- on a bench PC or a CI runner that is not the target notebook at all, since dry run never requires the `1S-WIN11` USB label when `-UsbRoot` is passed explicitly.
+
+Run it with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deployment\Scripts\Start-Deployment.ps1 -UsbRoot <path> -DryRun
+```
+
+`-DryRun` implies `-NonInteractive` unless you explicitly override it, always starts from a fresh run (it never resumes or prompts about stale state), and announces the mode loudly at the console and in the log.
+
+What still runs for real: every detection, scan, and validation step, exactly as in a real deployment. Preflight checks, Windows Update scans, winget package detection, driver `.inf` enumeration, asset inventory collection, and the `Complete` step's credential-scrub preview all run against the real machine, because that detection is the actual value of a dry run.
+
+What never happens: no computer rename, no local user creation, no scheduled task registration, no automatic-logon registry changes, no WLAN profile changes, no driver installs, no app installs/updates, no reboot, and no email send. Every one of those is replaced by a log line prefixed `DRYRUN` and an entry in the run's `dryrun_actions` audit trail. A step that would normally request a reboot instead records the request and lets the dry run continue straight on to the next step, so one pass always walks every step in `Get-DeploymentSteps` order.
+
+Dry run never touches a real deployment's state or logs. It reads and writes its own shadow files instead:
+
+```text
+Deployment\State\deployment_state.dryrun.json
+Deployment\Logs\<SerialOrComputerName>\dryrun-<RunId>\
+Deployment\Reports\<SerialOrComputerName>\dryrun\
+```
+
+At the end of a successful run, the console and log print a one-line result, for example:
+
+```text
+DRYRUN RESULT: steps=17 actions=23 would-reboot=1
+```
+
+and a Markdown report is written to `Deployment\Reports\<SerialOrComputerName>\dryrun\dryrun-summary-<RunId>.md`, grouping every recorded action under a heading per step (only steps that actually logged something), each with its timestamp and a compact JSON rendering of the action's data so nothing is dropped.
+
+A `dryrun-smoke` job in `.github/workflows/ci.yml` runs `Start-Deployment.ps1 -DryRun` against the checked-out toolkit itself on every pull request, with a CI-only config overlay that relaxes settings specific to a GitHub-hosted runner (no winget/WLAN/Datto RMM dependency, relaxed free-space/pending-reboot checks), then asserts the run exits `0`, the summary report was written, and no local user, scheduled task, or computer rename was left behind on the runner.
+
 ## Resume And Reboot Handling
 
 The toolkit registers a scheduled task named `OneSolutionWin11DeploymentResume` when a reboot is required. Repeated runs use the same task name and replace it rather than creating duplicates. The task has two triggers:

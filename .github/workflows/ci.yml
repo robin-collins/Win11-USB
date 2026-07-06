@@ -96,3 +96,145 @@ jobs:
           # OSIT_LOCAL_ADMIN_PASSWORD must be present in the environment before it runs.
           OSIT_LOCAL_ADMIN_PASSWORD: 'not-a-real-secret-ci-placeholder-value'
         run: pwsh -File Validate-Unattend.ps1 -Ci
+
+  dryrun-smoke:
+    # Tier 2 smoke test (FABLE_TASKS.md T08): runs the whole orchestrator against this checked
+    # out copy of the toolkit itself (not a generated USB) with -DryRun, so a broken step script
+    # or a broken dry-run code path is caught on every PR, cheaply, without any real hardware or
+    # Hyper-V rehearsal (Tier 1). Uses Windows PowerShell 5.1 -- the toolkit's actual production
+    # runtime on a client notebook -- rather than pwsh 7, matching how a technician really runs
+    # Start-Deployment.ps1.
+    name: Dry-run smoke test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Capture pre-run machine state
+        id: baseline
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $activeNameKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName'
+          $computerName = (Get-ItemProperty -LiteralPath $activeNameKey -Name ComputerName).ComputerName
+          "computer_name=$computerName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Apply CI-safe deployment_config.json overlay
+        shell: pwsh
+        run: |
+          # -DryRun already re-runs every step's real detection/scan logic for real (that is the
+          # whole point of a dry run), and Invoke-PreflightChecks.ps1 already downgrades Fail to
+          # Warn in dry-run for the three checks FABLE_TASKS.md T07a names as environment-
+          # dependent realities rather than config defects: Administrator, Internet, AC Power
+          # (see Get-EffectivePreflightStatus). This overlay only relaxes settings that are
+          # about *this specific* GitHub-hosted runner not matching a real client notebook --
+          # winget/WLAN/Datto RMM presence on a foreign CI image -- plus a little defensive
+          # slack (pending-reboot/free-space) that a freshly provisioned, shared runner image
+          # could plausibly trip and that Invoke-PreflightChecks.ps1 does not already downgrade
+          # for dry-run. Deliberately NOT overridden: computer_name_mode (left at the checked-in
+          # "prompt", which -DryRun's implied -NonInteractive already no-ops safely without
+          # depending on this runner's BIOS serial number being well-formed).
+          $configPath = Join-Path $env:GITHUB_WORKSPACE 'Deployment\Config\deployment_config.json'
+          $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+
+          $config.require_ac_power = $false
+          $config.require_internet = $false
+          $config.msp_wifi_setup.enabled = $false
+          $config.install_winget_apps = $false
+          $config.datto_rmm_site_id_uuid = ''
+          $config.allow_continue_with_pending_reboot = $true
+          $config.allow_continue_without_ac = $true
+          $config.minimum_free_space_gb = 1
+
+          $config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $configPath -Encoding UTF8
+          Write-Output 'CI deployment_config.json overlay applied:'
+          Get-Content -LiteralPath $configPath -Raw | Write-Output
+
+      - name: Run Start-Deployment.ps1 -UsbRoot $env:GITHUB_WORKSPACE -DryRun
+        shell: powershell
+        env:
+          # CI-only dummy value, matching the 'unattend' job's convention above -- never a real
+          # secret. -DryRun implies -NonInteractive, so CreateLocalAdmin's osit_secret password
+          # lookup must find a value here rather than prompting for one.
+          OSIT_LOCAL_ADMIN_PASSWORD: 'not-a-real-secret-ci-placeholder-value'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:GITHUB_WORKSPACE\Deployment\Scripts\Start-Deployment.ps1" -UsbRoot $env:GITHUB_WORKSPACE -DryRun
+          $exitCode = $LASTEXITCODE
+          if ($exitCode) {
+            Write-Output "Start-Deployment.ps1 -DryRun exited with code $exitCode."
+            exit $exitCode
+          }
+
+      - name: Assert the dry-run summary report was written
+        shell: pwsh
+        run: |
+          $reportsRoot = Join-Path $env:GITHUB_WORKSPACE 'Deployment\Reports'
+          $summary = Get-ChildItem -Path $reportsRoot -Recurse -Filter 'dryrun-summary-*.md' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $summary) {
+            Write-Output "No dryrun-summary-*.md file was found under $reportsRoot."
+            exit 1
+          }
+          Write-Output "Found dry-run summary report: $($summary.FullName)"
+          Write-Output '--- report content ---'
+          Get-Content -LiteralPath $summary.FullName -Raw | Write-Output
+
+      - name: Assert zero mutation
+        shell: powershell
+        env:
+          BASELINE_COMPUTER_NAME: ${{ steps.baseline.outputs.computer_name }}
+        run: |
+          # A dry run's entire premise is that mutating actions are logged instead of executed
+          # (Common.ps1's Write-DryRunAction / Invoke-ExternalCommand refusal, FABLE_TASKS.md
+          # T05). This is a best-effort, CI-practical spot check, not an exhaustive system
+          # audit:
+          #   - Checked below: the specific, cheap-to-assert machine-state changes this
+          #     toolkit's mutating steps make (a new local OSIT user, the resume scheduled
+          #     task, the computer name, and -- the state-isolation invariant itself -- that
+          #     only the shadow deployment_state.dryrun.json was written, never the real
+          #     deployment_state.json).
+          #   - Deliberately NOT checked here, and why:
+          #       * Winlogon autologon registry values / cached unattend files under
+          #         C:\Windows\Panther -- this job never reaches a real reboot point (dry-run
+          #         traverses every step in one pass without actually rebooting), so
+          #         Enable-DeploymentAutoLogon and the Complete-step scrub never run their real
+          #         (non-dry-run) branches in the first place; those branches are already
+          #         covered directly by Tests\Unit\DryRun.Tests.ps1 and
+          #         Tests\Unit\DryRunInstallSteps.Tests.ps1 at the unit level, where they can be
+          #         exercised without touching a shared runner's registry at all.
+          #       * powercfg / power-plan values -- PowerSettings' dry-run branch logs the exact
+          #         command line instead of running powercfg.exe (Configure-PowerSettings.ps1,
+          #         T07a) and is unit-tested directly; re-querying powercfg here would only
+          #         reconfirm what that unit test already proves, and the runner is destroyed
+          #         after the job regardless of the outcome.
+          #       * WLAN profiles -- msp_wifi_setup.enabled=false in the CI overlay above means
+          #         this job never attempts one, dry-run or otherwise.
+          #       * A byte-for-byte before/after filesystem or registry snapshot of the whole
+          #         runner -- not practical (or meaningful) on a shared, ephemeral GitHub-hosted
+          #         VM that this job does not otherwise control or own the baseline of.
+          $ErrorActionPreference = 'Stop'
+          $failures = @()
+
+          $ositUser = Get-LocalUser -Name 'OSIT' -ErrorAction SilentlyContinue
+          if ($ositUser) { $failures += 'A local user named OSIT exists -- CreateLocalAdmin mutated the runner.' }
+
+          $resumeTask = Get-ScheduledTask -TaskName 'OneSolutionWin11DeploymentResume' -ErrorAction SilentlyContinue
+          if ($resumeTask) { $failures += 'The resume scheduled task is registered -- Request-DeploymentReboot mutated the runner.' }
+
+          $activeNameKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName'
+          $currentComputerName = (Get-ItemProperty -LiteralPath $activeNameKey -Name ComputerName).ComputerName
+          if ($currentComputerName -ne $env:BASELINE_COMPUTER_NAME) {
+            $failures += "Computer name changed from '$env:BASELINE_COMPUTER_NAME' to '$currentComputerName' -- ConfigureComputerName mutated the runner."
+          }
+
+          $realStateFile = Join-Path $env:GITHUB_WORKSPACE 'Deployment\State\deployment_state.json'
+          $shadowStateFile = Join-Path $env:GITHUB_WORKSPACE 'Deployment\State\deployment_state.dryrun.json'
+          if (Test-Path -LiteralPath $realStateFile) { $failures += "A real deployment_state.json was written -- the state-isolation invariant (T05) was violated: $realStateFile" }
+          if (-not (Test-Path -LiteralPath $shadowStateFile)) { $failures += "The expected shadow state file was not found: $shadowStateFile" }
+
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Output "MUTATION CHECK FAILED: $_" }
+            exit 1
+          }
+          Write-Output 'Zero-mutation checks passed: no OSIT local user, no resume scheduled task, computer name unchanged, and only the shadow state file was written.'
