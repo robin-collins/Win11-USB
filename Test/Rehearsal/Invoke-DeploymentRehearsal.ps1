@@ -67,6 +67,7 @@
         cleanly there instead of throwing (see RehearsalCommon.ps1).
 #>
 
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'This is an interactive bench-technician CLI harness entry point; the colored console progress/plan output is the primary UX for the person driving a rehearsal run, alongside the structured artifacts written under Test\Rehearsal\Artifacts.')]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]

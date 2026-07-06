@@ -24,6 +24,7 @@ function Test-DeploymentDryRun {
 }
 
 function Get-DryRunStepName {
+    [OutputType([string])]
     [CmdletBinding()]
     param(
         [hashtable]$State,

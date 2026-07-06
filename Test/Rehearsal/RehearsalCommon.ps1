@@ -58,6 +58,7 @@ function Test-RehearsalCommandAvailable {
         .SYNOPSIS
             Returns whether a cmdlet/function exists in the current session, without throwing.
     #>
+    [OutputType([bool])]
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -69,6 +70,7 @@ function New-RehearsalCheckResult {
         .SYNOPSIS
             Builds one structured prerequisite-check result entry.
     #>
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$Check,
