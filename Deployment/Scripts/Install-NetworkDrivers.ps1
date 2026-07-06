@@ -39,6 +39,12 @@ foreach ($vendorFolder in $vendorFolders) {
 
     Write-Log -Level Info -Message "Attempting network driver install for vendor '$($vendorFolder.Name)' ($infCount INF file(s))."
     try {
+        # No dry-run branch is needed here (FABLE_TASKS.md T07a): the .inf enumeration above
+        # is the real value of this step and already runs unconditionally for real, and
+        # Install-InfDriversFromFolder's actual mutation -- pnputil /add-driver ... /install --
+        # goes through Invoke-ExternalCommand without -ReadOnly, so Common.ps1's existing
+        # dry-run refusal (T05) already logs "would run: pnputil.exe ..." with the concrete
+        # folder/INF arguments and returns a synthetic success instead of staging anything.
         $summary = Install-InfDriversFromFolder -Folder $vendorFolder.FullName -LogName ("pnputil-network-{0}.log" -f (Get-SafeName -Value $vendorFolder.Name))
         $results += ,([ordered]@{ vendor = $vendorFolder.Name; status = 'Processed'; count = $summary.count; exit_code = $summary.exit_code })
     } catch {

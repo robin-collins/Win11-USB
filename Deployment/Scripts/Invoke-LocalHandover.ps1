@@ -44,7 +44,12 @@ $resolvedCurrent = (Resolve-Path -LiteralPath $UsbRoot -ErrorAction Stop).Path.T
 
 if ($resolvedCurrent -ieq $normalizedTarget) {
     Write-Log -Level Info -Message "Already running from the local handover path $normalizedTarget; no copy is required."
-    if ($state -and (-not $state.ContainsKey('local_deployment_root') -or [string]::IsNullOrWhiteSpace([string]$state.local_deployment_root))) {
+    # Dry-run invariant (FABLE_TASKS.md T07a): never write state.local_deployment_root in a
+    # dry run, even in this "already there" edge case, so Start-Deployment.ps1's post-step
+    # switch-over logic (which keys off that field) has nothing to react to.
+    if ((Test-DeploymentDryRun)) {
+        Write-Log -Level Info -Message 'Dry run: not recording local_deployment_root even though already at the target path, so no deployment-root switch-over is triggered.'
+    } elseif ($state -and (-not $state.ContainsKey('local_deployment_root') -or [string]::IsNullOrWhiteSpace([string]$state.local_deployment_root))) {
         $state.local_deployment_root = $normalizedTarget
         Write-DeploymentState -State $state -StatePath $StatePath
     }
@@ -59,11 +64,52 @@ if ([bool]$handover.require_network -and -not (Test-InternetConnectivity)) {
     return
 }
 
-Write-Log -Level Info -Message "Copying deployment files from $resolvedCurrent to $normalizedTarget for local handover."
-New-Item -ItemType Directory -Path $normalizedTarget -Force -ErrorAction Stop | Out-Null
-
 $sourceDeployment = Join-Path $resolvedCurrent 'Deployment'
 $targetDeployment = Join-Path $normalizedTarget 'Deployment'
+$sourceEnvPath = Join-Path $resolvedCurrent '.env'
+
+if (Test-DeploymentDryRun) {
+    # Detection value kept for real (FABLE_TASKS.md T07a, same "enumeration is the real value"
+    # pattern as the driver-folder scan): confirm the *source* tree actually has what a real
+    # copy would need, so a broken source tree is still caught even though nothing is copied.
+    $requiredBeforeCopy = @(
+        (Join-Path $sourceDeployment 'Scripts\Common.ps1'),
+        (Join-Path $sourceDeployment 'Scripts\Start-Deployment.ps1'),
+        (Join-Path $sourceDeployment 'Config\deployment_config.json')
+    )
+    foreach ($requiredPath in $requiredBeforeCopy) {
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            throw "Local deployment handover dry run: expected source file missing at $requiredPath"
+        }
+    }
+
+    # robocopy /L (list-only) genuinely does not copy, delete, timestamp, or create anything;
+    # -ReadOnly asserts exactly that to Invoke-ExternalCommand so it executes for real even in
+    # dry-run mode instead of being refused like a real mutating command (Common.ps1, T05),
+    # letting a technician see what WOULD copy without anything actually copying.
+    $listArgs = @($sourceDeployment, $targetDeployment, '/E', '/L', '/R:0', '/W:0', '/NFL', '/NDL', '/NP', '/NJH', '/NJS')
+    $listResult = Invoke-ExternalCommand -FilePath robocopy.exe -Arguments $listArgs -AllowedExitCodes @(0, 1, 2, 3, 4, 5, 6, 7) -LogName 'local-handover-robocopy-dryrun-list.log' -ReadOnly -State $state
+
+    if (Test-Path -LiteralPath $sourceEnvPath -PathType Leaf) {
+        Write-DryRunAction -State $state -Step 'LocalHandover' -Action "would copy .env from $sourceEnvPath to $(Join-Path $normalizedTarget '.env')" -Data ([ordered]@{
+                source = $sourceEnvPath
+                target = (Join-Path $normalizedTarget '.env')
+            })
+    } else {
+        Write-Log -Level Info -Message "No .env file found at $resolvedCurrent; nothing to copy for local handover .env in this dry run."
+    }
+
+    Write-StructuredLog -Level Info -Message 'Local deployment handover dry run completed' -Data ([ordered]@{
+            source                   = $resolvedCurrent
+            target                   = $normalizedTarget
+            robocopy_list_exit_code  = $listResult.exit_code
+        })
+    Write-Log -Level Success -Message "Dry run: local deployment handover would copy $resolvedCurrent to $normalizedTarget. Not creating the target folder, not copying any files, and not switching the running deployment root."
+    return
+}
+
+Write-Log -Level Info -Message "Copying deployment files from $resolvedCurrent to $normalizedTarget for local handover."
+New-Item -ItemType Directory -Path $normalizedTarget -Force -ErrorAction Stop | Out-Null
 
 # robocopy mirrors reliably at scale (drivers, app installers, existing logs/state) and
 # retries transient failures far more gracefully than Copy-Item -Recurse for a tree this
@@ -72,7 +118,6 @@ $targetDeployment = Join-Path $normalizedTarget 'Deployment'
 $robocopyArgs = @($sourceDeployment, $targetDeployment, '/E', '/R:3', '/W:5', '/NFL', '/NDL', '/NP', '/NJH', '/NJS')
 $copyResult = Invoke-ExternalCommand -FilePath robocopy.exe -Arguments $robocopyArgs -AllowedExitCodes @(0, 1, 2, 3, 4, 5, 6, 7) -LogName 'local-handover-robocopy.log'
 
-$sourceEnvPath = Join-Path $resolvedCurrent '.env'
 if (Test-Path -LiteralPath $sourceEnvPath -PathType Leaf) {
     Copy-Item -LiteralPath $sourceEnvPath -Destination (Join-Path $normalizedTarget '.env') -Force -ErrorAction Stop
 }
