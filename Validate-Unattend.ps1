@@ -146,12 +146,12 @@ function Get-UnattendSchemaDllCandidates {
 
     $ordered = @()
     $ordered += @($candidateMatches |
-            Where-Object { $_.FullName -match "\\WSIM\\$([regex]::Escape($preferredArchitecture))\\" } |
-            Sort-Object FullName -Descending)
+        Where-Object { $_.FullName -match "\\WSIM\\$([regex]::Escape($preferredArchitecture))\\" } |
+        Sort-Object FullName -Descending)
 
     $ordered += @($candidateMatches |
-            Where-Object { $_.FullName -notmatch '\\WSIM\\arm64\\' } |
-            Sort-Object FullName -Descending)
+        Where-Object { $_.FullName -notmatch '\\WSIM\\arm64\\' } |
+        Sort-Object FullName -Descending)
 
     $ordered += @($candidateMatches | Sort-Object FullName -Descending)
 
@@ -177,10 +177,12 @@ function Get-CompatibleUnattendSchema {
                 path = $resolvedCandidate
                 text = $schemaText
             }
-        } catch [System.BadImageFormatException] {
+        }
+        catch [System.BadImageFormatException] {
             Add-ValidationResult -Status Warn -Check 'ADK schema DLL architecture' -Message "Skipping incompatible schema DLL for this PowerShell process: $resolvedCandidate"
             continue
-        } catch {
+        }
+        catch {
             if ($_.Exception.Message -match 'architecture is not compatible') {
                 Add-ValidationResult -Status Warn -Check 'ADK schema DLL architecture' -Message "Skipping incompatible schema DLL for this PowerShell process: $resolvedCandidate"
                 continue
@@ -202,8 +204,8 @@ function Get-WingetCommand {
     if ($command) { return $command.Source }
 
     $candidate = Get-ChildItem -Path "$env:ProgramFiles\WindowsApps" -Filter winget.exe -Recurse -ErrorAction SilentlyContinue |
-        Sort-Object FullName -Descending |
-        Select-Object -First 1
+    Sort-Object FullName -Descending |
+    Select-Object -First 1
     if ($candidate) { return $candidate.FullName }
 
     return $null
@@ -284,7 +286,7 @@ function Test-XmlSchema {
     )
 
     $validationErrors = New-Object 'System.Collections.Generic.List[string]'
-    $handler = [System.Xml.Schema.ValidationEventHandler]{
+    $handler = [System.Xml.Schema.ValidationEventHandler] {
         param($schemaEventSender, $schemaValidationEventArgs)
         $validationErrors.Add($schemaValidationEventArgs.Exception.Message) | Out-Null
     }
@@ -296,7 +298,8 @@ function Test-XmlSchema {
         $xml.Schemas.Add($schema) | Out-Null
         $xml.Load($XmlPath)
         $xml.Validate($handler)
-    } finally {
+    }
+    finally {
         $schemaReader.Close()
     }
 
@@ -370,7 +373,8 @@ function Test-ExpectedText {
     $actual = Get-NodeText -Xml $Xml -NamespaceManager $NamespaceManager -XPath $XPath
     if ($actual -eq $Expected) {
         Add-ValidationResult -Status Pass -Check $Check -Message "Expected value '$Expected' found."
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Fail -Check $Check -Message "Expected '$Expected' but found '$actual'." -Data @{ xpath = $XPath; actual = $actual; expected = $Expected }
     }
 }
@@ -386,19 +390,23 @@ Write-Host "Mode: $(if ($isTemplate) { 'Template' } else { 'Generated' })"
 if ($isTemplate) {
     if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__') {
         Add-ValidationResult -Status Pass -Check 'Template password placeholder' -Message 'OSIT password placeholder is present.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Fail -Check 'Template password placeholder' -Message 'Template should contain __OSIT_LOCAL_ADMIN_PASSWORD__.'
     }
 
     if ($content -match '__WINDOWS_PE_SETTINGS__') {
         Add-ValidationResult -Status Pass -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is present for config-driven partitioning.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Warn -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is absent; generated partitioning block cannot be inserted by Initialize-UsbDeployment.ps1.'
     }
-} else {
+}
+else {
     if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__|__WINDOWS_PE_SETTINGS__') {
         Add-ValidationResult -Status Fail -Check 'Generated placeholders' -Message 'Generated Autounattend.xml must not contain toolkit placeholders.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Pass -Check 'Generated placeholders' -Message 'No toolkit placeholders found.'
     }
 }
@@ -411,7 +419,8 @@ try {
     try {
         [xml]$xml = $validationContent
         Add-ValidationResult -Status Pass -Check 'XML well-formed' -Message 'XML parsed successfully after template placeholder normalization.'
-    } catch {
+    }
+    catch {
         Add-ValidationResult -Status Fail -Check 'XML well-formed' -Message $_.Exception.Message
         throw
     }
@@ -421,7 +430,8 @@ try {
     $rootNs = $xml.DocumentElement.NamespaceURI
     if ($rootName -eq 'unattend' -and $rootNs -eq 'urn:schemas-microsoft-com:unattend') {
         Add-ValidationResult -Status Pass -Check 'Root element' -Message 'Root element is unattend with the expected namespace.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Fail -Check 'Root element' -Message "Unexpected root element '$rootName' namespace '$rootNs'."
     }
 
@@ -432,21 +442,24 @@ try {
     $autologonPassword = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:AutoLogon/u:Password/u:Value'
     if (-not [string]::IsNullOrWhiteSpace($localPassword) -and $localPassword -eq $autologonPassword) {
         Add-ValidationResult -Status Pass -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values match.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Fail -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values are missing or do not match.'
     }
 
     $specializeCommands = @($xml.SelectNodes('//u:settings[@pass="specialize"]//u:RunSynchronousCommand/u:Path', $ns) | ForEach-Object { $_.InnerText })
     if ($specializeCommands -match 'BypassNRO') {
         Add-ValidationResult -Status Pass -Check 'BypassNRO' -Message 'BypassNRO registry command is present.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Fail -Check 'BypassNRO' -Message 'BypassNRO registry command was not found in specialize pass.'
     }
 
     $firstLogonCommand = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:FirstLogonCommands/u:SynchronousCommand/u:CommandLine'
     if ($firstLogonCommand -match '1S-WIN11' -and $firstLogonCommand -match 'Start-Deployment\.ps1') {
         Add-ValidationResult -Status Pass -Check 'FirstLogon deployment command' -Message 'FirstLogon command locates the USB label and starts Start-Deployment.ps1.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Fail -Check 'FirstLogon deployment command' -Message 'FirstLogon command does not contain both USB label 1S-WIN11 and Start-Deployment.ps1.'
     }
 
@@ -460,14 +473,16 @@ try {
         $runSync = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path'
         if ($runSync -and $runSync.Length -le 259) {
             Add-ValidationResult -Status Pass -Check 'windowsPE command length' -Message "RunSynchronous command is $($runSync.Length) characters (limit 259)."
-        } else {
+        }
+        else {
             $actualLength = if ($runSync) { $runSync.Length } else { 0 }
             Add-ValidationResult -Status Fail -Check 'windowsPE command length' -Message "RunSynchronous command is $actualLength characters; the unattend Path limit is 259 and Windows Setup fails with 0x80004005 - 0x40030 when it is exceeded."
         }
 
         if ($runSync -match 'OSIT-DiskPart\.txt' -and $runSync -match 'diskpart\s+/s') {
             Add-ValidationResult -Status Pass -Check 'DiskPart script reference' -Message 'RunSynchronous command locates USB-root OSIT-DiskPart.txt and runs diskpart /s against it.'
-        } else {
+        }
+        else {
             Add-ValidationResult -Status Fail -Check 'DiskPart script reference' -Message 'RunSynchronous command does not reference USB-root OSIT-DiskPart.txt with diskpart /s.'
         }
 
@@ -482,35 +497,42 @@ try {
             foreach ($fragment in @("select disk $expectedDiskId", 'clean', 'convert gpt', "create partition efi size=$efiSize", "create partition msr size=$msrSize", "shrink desired=$recoverySize minimum=$recoverySize", 'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac', 'gpt attributes=0x8000000000000001')) {
                 if ($diskPartContent -match [regex]::Escape($fragment)) {
                     Add-ValidationResult -Status Pass -Check "Partition command: $fragment" -Message 'Expected partition command fragment found.'
-                } else {
+                }
+                else {
                     Add-ValidationResult -Status Fail -Check "Partition command: $fragment" -Message 'Expected partition command fragment missing from OSIT-DiskPart.txt.'
                 }
             }
 
             if ($diskPartContent -match '(?im)^\s*assign\s+letter=C\b') {
                 Add-ValidationResult -Status Fail -Check 'DiskPart drive letters' -Message 'Script assigns letter C, which WinPE often gives to the USB stick on a blank disk; a failed assign aborts the rest of the diskpart script.'
-            } else {
+            }
+            else {
                 Add-ValidationResult -Status Pass -Check 'DiskPart drive letters' -Message 'Script avoids assigning drive letter C during WinPE.'
             }
 
             if ($diskPartContent -match 'label="' -or $diskPartContent -match 'letter="' -or $diskPartContent -match 'set id="') {
                 Add-ValidationResult -Status Fail -Check 'Partition command quoting' -Message 'DiskPart script contains quoted label, drive letter, or GUID values that diskpart /s does not require.'
-            } else {
+            }
+            else {
                 Add-ValidationResult -Status Pass -Check 'Partition command quoting' -Message 'DiskPart script avoids unnecessary quoted values.'
             }
-        } else {
+        }
+        else {
             Add-ValidationResult -Status Fail -Check 'DiskPart script file' -Message "windowsPE pass expects OSIT-DiskPart.txt beside the answer file, but it was not found: $diskPartScriptPath"
         }
-    } elseif ($config -and $config.wipe_repartition_drive -eq $true -and -not $isTemplate) {
+    }
+    elseif ($config -and $config.wipe_repartition_drive -eq $true -and -not $isTemplate) {
         Add-ValidationResult -Status Fail -Check 'windowsPE pass' -Message 'Config expects wipe_repartition_drive=true, but generated XML has no windowsPE pass.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Warn -Check 'windowsPE pass' -Message 'windowsPE pass is absent. This is expected for the repository template or technician-led disk selection.'
     }
 
     $schemaDllCandidates = @()
     if ($DllPath) {
         $schemaDllCandidates += $DllPath
-    } else {
+    }
+    else {
         $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
     }
 
@@ -518,7 +540,8 @@ try {
         try {
             Install-AdkPackagesWithWinget
             $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
-        } catch {
+        }
+        catch {
             Add-ValidationResult -Status Fail -Check 'ADK winget install' -Message $_.Exception.Message
         }
     }
@@ -536,28 +559,33 @@ try {
             $schemaErrors = @(Test-XmlSchema -XmlPath $tempValidationFile -SchemaText $schema.text)
             if ($schemaErrors.Count -eq 0) {
                 Add-ValidationResult -Status Pass -Check 'ADK schema validation' -Message "Schema validation passed using $($schema.path)."
-            } else {
+            }
+            else {
                 foreach ($schemaError in $schemaErrors) {
                     Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $schemaError
                 }
             }
-        } catch {
+        }
+        catch {
             Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $_.Exception.Message
         }
-    } elseif ($RequireSchema) {
+    }
+    elseif ($RequireSchema) {
         Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message 'Schema DLL was not found and -RequireSchema was specified.'
-    } else {
+    }
+    else {
         Add-ValidationResult -Status Warn -Check 'ADK schema validation' -Message 'Schema DLL not found. Install Windows ADK or pass -DllPath for full schema validation.'
     }
-} finally {
+}
+finally {
     Remove-Item -LiteralPath $tempValidationFile -Force -ErrorAction SilentlyContinue
 }
 
 $failures = @($script:ValidationResults | Where-Object { $_.status -eq 'Fail' })
 Write-Host ''
 Write-Host ("Validation complete: {0} pass, {1} warning, {2} failure" -f `
-        @($script:ValidationResults | Where-Object { $_.status -eq 'Pass' }).Count, `
-        @($script:ValidationResults | Where-Object { $_.status -eq 'Warn' }).Count, `
+    @($script:ValidationResults | Where-Object { $_.status -eq 'Pass' }).Count, `
+    @($script:ValidationResults | Where-Object { $_.status -eq 'Warn' }).Count, `
         $failures.Count)
 
 if ($failures.Count -gt 0) {
