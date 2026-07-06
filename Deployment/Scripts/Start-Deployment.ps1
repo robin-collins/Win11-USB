@@ -14,10 +14,12 @@ function Get-DeploymentSteps {
         'Preflight',
         'ConfigureComputerName',
         'CreateLocalAdmin',
+        'PowerSettings',
         'WindowsUpdates',
         'AssetInventory',
         'ModelDrivers',
         'WingetApps',
+        'DattoRmm',
         'LocalApps',
         'DesktopItems',
         'FinalReport',
@@ -318,6 +320,10 @@ function Invoke-DeploymentStep {
         'Preflight' { & (Join-Path $PSScriptRoot 'Invoke-PreflightChecks.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'ConfigureComputerName' { Invoke-ComputerNameStep -UsbRoot $UsbRoot -State $State -StatePath $StatePath -Config $Config }
         'CreateLocalAdmin' { Invoke-CreateLocalAdminStep -UsbRoot $UsbRoot -State $State -StatePath $StatePath -Config $Config }
+        'PowerSettings' {
+            if ([bool]$Config.configure_power_settings) { & (Join-Path $PSScriptRoot 'Configure-PowerSettings.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
+            else { Write-Log -Level Info -Message 'Power settings configuration is disabled by config.' }
+        }
         'WindowsUpdates' { & (Join-Path $PSScriptRoot 'Install-WindowsUpdates.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'AssetInventory' {
             $reportRoot = Get-DeploymentReportRoot -UsbRoot $UsbRoot
@@ -332,6 +338,7 @@ function Invoke-DeploymentStep {
             if ([bool]$Config.install_winget_apps) { & (Join-Path $PSScriptRoot 'Install-WingetApps.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
             else { Write-Log -Level Info -Message 'winget app installation is disabled by config.' }
         }
+        'DattoRmm' { & (Join-Path $PSScriptRoot 'Install-DattoRmm.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'LocalApps' {
             if ([bool]$Config.install_local_apps) { & (Join-Path $PSScriptRoot 'Install-LocalApps.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
             else { Write-Log -Level Info -Message 'Local app installation is disabled by config.' }

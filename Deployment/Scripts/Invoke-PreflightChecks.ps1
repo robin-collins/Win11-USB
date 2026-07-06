@@ -65,9 +65,10 @@ foreach ($dir in $requiredDirs) {
 
 $requiredScripts = @(
     'Start-Deployment.ps1', 'Invoke-PreflightChecks.ps1', 'Install-WindowsUpdates.ps1',
-    'Install-ModelDrivers.ps1', 'Install-WingetApps.ps1', 'Install-LocalApps.ps1',
-    'Configure-DesktopItems.ps1', 'Get-AssetInventory.ps1', 'Write-DeploymentReport.ps1',
-    'Resume-Deployment.ps1', 'Common.ps1'
+    'Install-ModelDrivers.ps1', 'Install-WingetApps.ps1', 'Install-DattoRmm.ps1',
+    'Install-LocalApps.ps1', 'Configure-PowerSettings.ps1', 'Configure-DesktopItems.ps1',
+    'Get-AssetInventory.ps1', 'Write-DeploymentReport.ps1', 'Resume-Deployment.ps1',
+    'Common.ps1'
 )
 foreach ($script in $requiredScripts) {
     $scriptPath = Join-Path $paths.Scripts $script
@@ -82,6 +83,22 @@ foreach ($file in $requiredConfigs) {
     } catch {
         Add-PreflightResult -Results $results -Name "Config $file" -Status 'Fail' -Message $_.Exception.Message -Data $null
     }
+}
+
+$dattoSiteId = if ($config.ContainsKey('datto_rmm_site_id_uuid')) { ([string]$config.datto_rmm_site_id_uuid).Trim() } else { '' }
+if (-not [string]::IsNullOrWhiteSpace($dattoSiteId)) {
+    if ($dattoSiteId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        try {
+            [guid]$dattoSiteId | Out-Null
+            Add-PreflightResult -Results $results -Name 'Datto RMM Site ID' -Status 'Pass' -Message "Datto site UUID format is valid: $dattoSiteId" -Data @{ site_id_uuid = $dattoSiteId }
+        } catch {
+            Add-PreflightResult -Results $results -Name 'Datto RMM Site ID' -Status 'Fail' -Message "Datto site UUID is invalid: $dattoSiteId" -Data @{ site_id_uuid = $dattoSiteId }
+        }
+    } else {
+        Add-PreflightResult -Results $results -Name 'Datto RMM Site ID' -Status 'Fail' -Message "Datto site UUID must look like 1193f864-66b2-49fd-bafe-950ba1e803e5." -Data @{ site_id_uuid = $dattoSiteId }
+    }
+} else {
+    Add-PreflightResult -Results $results -Name 'Datto RMM Site ID' -Status 'Warn' -Message 'Datto RMM site ID is blank; Datto RMM install step will be skipped.' -Data $null
 }
 
 $systemDrive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$env:SystemDrive'"

@@ -20,12 +20,15 @@ flowchart TD
   G --> H["Start-Deployment.ps1 opens from the USB"]
   H --> I["Preflight checks"]
   I --> J["Computer name and local admin prompts if configured"]
-  J --> K["Windows Updates"]
-  K --> L["Model driver check"]
-  L --> M["winget and local apps"]
-  M --> N["Final desktop cleanup"]
-  N --> O["Asset inventory and final reports"]
-  O --> P["Ready for domain join or Entra join"]
+  J --> K["Power settings"]
+  K --> L["Windows Updates"]
+  L --> M["Model driver check"]
+  M --> N["winget apps"]
+  N --> O["Datto RMM if site UUID configured"]
+  O --> P["local USB apps"]
+  P --> Q["Final desktop cleanup"]
+  Q --> R["Asset inventory and final reports"]
+  R --> S["Ready for domain join or Entra join"]
 ```
 
 ```mermaid
@@ -99,6 +102,12 @@ Edit the active config files under `Deployment\Config`:
 
 Matching `.example.json` files are included as templates.
 
+Detailed config references:
+
+- `Deployment\Config\deployment_config.example.json.md`
+- `Deployment\Config\winget_packages.example.json.md`
+- `Deployment\Config\local_apps.example.json.md`
+
 Important `deployment_config.json` options:
 
 - `wipe_repartition_drive`: when `true`, the generated USB `Autounattend.xml` wipes the configured disk and creates the standard OSIT UEFI/GPT layout before installing Windows. Default is `false`.
@@ -109,12 +118,18 @@ Important `deployment_config.json` options:
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
+- `configure_power_settings`: sets power timeouts before long-running update and install stages.
+- `power_timeout_battery_minutes`: defaults to `60`, meaning display/sleep/hibernate after 1 hour on battery.
+- `power_timeout_ac_minutes`: defaults to `0`, meaning never while plugged in.
 - `osit_local_admin_username`: defaults to `OSIT`. This is the always-present primary local admin.
 - `primary_setup_username`: defaults to `OSIT`.
 - `final_resultant_user`: user profile whose Desktop should represent the final technician-ready desktop. Defaults to `OSIT`.
 - `additional_local_users`: creates optional extra local accounts. Each entry supports `username`, `full_name`, `description`, `groups`, `password_mode`, `password_never_expires`, `enabled`, and `primary_setup_user`.
 - `configure_desktop_items`: runs final desktop cleanup after app installation.
 - `desktop_items`: controls Public Desktop and final user Desktop desired state.
+- `datto_rmm_site_id_uuid`: optional Datto RMM site UUID. When present, Datto installs after hostname, Windows Updates, drivers, and winget, but before local USB apps.
+- `datto_rmm_install_arguments`: optional arguments passed to the Datto installer.
+- `datto_rmm_required`: when `true`, fail if the installer completes but Datto/CentraStage is not detected.
 - `install_winget_apps`, `install_local_apps`, `install_offline_drivers`: enable or skip those phases.
 - `stop_before_domain_join`: documents the intended stopping point. The scripts do not perform customer identity joins.
 
@@ -168,6 +183,16 @@ Example desktop config:
 ```
 
 With `remove_unapproved_shortcuts=true` and an empty `common_desktop_items` list, winget/MSI shortcuts dropped onto the Public Desktop are removed. Add approved entries to keep or create only the shortcuts you want.
+
+Example Datto RMM config:
+
+```json
+"datto_rmm_site_id_uuid": "1193f864-66b2-49fd-bafe-950ba1e803e5",
+"datto_rmm_install_arguments": "",
+"datto_rmm_required": true
+```
+
+The Datto UUID is validated during preflight. If it is blank, the Datto install step is skipped.
 
 ## Security Notes
 
