@@ -97,6 +97,17 @@ $ErrorActionPreference = 'Stop'
 
 $scriptRoot = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 . (Join-Path $scriptRoot 'RehearsalCommon.ps1')
+. (Join-Path $scriptRoot 'RehearsalMonitoring.ps1')
+
+# New-RehearsalMedia (RehearsalCommon.ps1) dot-sources Deployment\Scripts\Common.ps1 lazily,
+# but it does so *inside its own function scope*, which is torn down when that function
+# returns -- so ConvertTo-PlainHashtable (used below) is not reliably available here just
+# because New-RehearsalMedia happened to load it internally. Loaded explicitly at this
+# script's own top level instead, the same lazy-if-not-already-loaded way RehearsalCommon.ps1
+# itself does it.
+if (-not (Test-RehearsalCommandAvailable -Name 'ConvertTo-PlainHashtable')) {
+    . (Join-Path $script:RehearsalRepoRoot 'Deployment\Scripts\Common.ps1')
+}
 
 Write-Host ''
 Write-Host '=== OSIT Windows 11 Deployment Rehearsal ===' -ForegroundColor Cyan
@@ -148,25 +159,62 @@ Write-Host 'Resolved rehearsal plan:' -ForegroundColor Cyan
     SkipAssertions   = $SkipAssertions.IsPresent
 } | Format-Table -AutoSize | Out-String | Write-Host
 
-# TODO(T10): New-RehearsalMedia -WorkingDirectory $WorkingDirectory -Scenario $Scenario
-#            -> builds the 16 GB "1S-WIN11" VHDX and runs the real Initialize-UsbDeployment.ps1
-#            against it, applying the scenario's config overlay.
+Write-Host 'Building rehearsal media (T10)...' -ForegroundColor Cyan
+$media = New-RehearsalMedia -WorkingDirectory $WorkingDirectory -Scenario $Scenario
+Write-Host "Rehearsal media built: $($media.VhdxPath)" -ForegroundColor Green
 
-# TODO(T11): New-RehearsalVm -VmName $VmName -IsoPath $IsoPath -MediaVhdxPath <from T10>
-#            -MemoryGB $MemoryGB -CpuCount $CpuCount -OsDiskGB $OsDiskGB
-#            -> Gen-2 VM, vTPM + Secure Boot, SCSI 0/LUN 0 OS disk + LUN 1 media disk,
-#            attaches to the 'Default Switch', takes the 'pre-boot' checkpoint.
+Write-Host 'Creating rehearsal VM (T11)...' -ForegroundColor Cyan
+$vm = New-RehearsalVm -VmName $VmName -IsoPath $IsoPath -MediaVhdxPath $media.VhdxPath -WorkingDirectory $WorkingDirectory -MemoryGB $MemoryGB -CpuCount $CpuCount -OsDiskGB $OsDiskGB
+Write-Host "Rehearsal VM created: $($vm.VmName)" -ForegroundColor Green
 
-# TODO(T12): guest monitoring loop (WinPE heartbeat -> PowerShell Direct polling of
-#            deployment_state.json) driven by -TimeoutMinutes, plus artifact harvest into
-#            Test\Rehearsal\Artifacts\<timestamp>\ on any terminal state.
+$exitCode = 1
+try {
+    Write-Host "Taking 'pre-boot' checkpoint..." -ForegroundColor Cyan
+    Checkpoint-Rehearsal -VmName $VmName -CheckpointName 'pre-boot'
 
-# TODO(T13): unless -SkipAssertions, Test-RehearsalResult against the harvested artifacts and
-#            in-guest state; exit non-zero with the failed-assertion summary on stderr if any
-#            assertion fails.
+    Write-Host 'Starting the VM...' -ForegroundColor Cyan
+    Start-VM -Name $VmName
 
-# TODO(T11): Remove-RehearsalVm -VmName $VmName unless -KeepVm.
+    # OSIT credential for PowerShell Direct (T12): the throwaway per-run password
+    # New-RehearsalMedia (T10) generated and wrote into the media's own .env, returned here so
+    # the harness never needs to re-mount the (now dismounted) media VHDX just to read it back.
+    $ositSecurePassword = ConvertTo-SecureString -String $media.OsitPassword -AsPlainText -Force
+    $ositCredential = New-Object System.Management.Automation.PSCredential('OSIT', $ositSecurePassword)
 
-Write-Host 'T09 scaffold complete: prerequisites passed and the rehearsal plan above is resolved.' -ForegroundColor Green
-Write-Host 'Media build, VM lifecycle, guest monitoring, and assertions are implemented by T10-T13; this scaffold stops here.' -ForegroundColor Yellow
-exit 0
+    $isHandoverScenario = $false
+    if ($media.MergedConfig -and $media.MergedConfig.ContainsKey('local_deployment_handover') -and $media.MergedConfig.local_deployment_handover) {
+        $handoverConfig = ConvertTo-PlainHashtable $media.MergedConfig.local_deployment_handover
+        $isHandoverScenario = [bool]($handoverConfig.ContainsKey('enabled') -and $handoverConfig.enabled)
+    }
+
+    Write-Host 'Monitoring the rehearsal (T12: Setup/WinPE, then guest deployment progress)...' -ForegroundColor Cyan
+    $artifactRoot = Join-Path $scriptRoot 'Artifacts'
+    $monitorResult = Invoke-RehearsalMonitoring -VmName $VmName -Credential $ositCredential -ArtifactRoot $artifactRoot -TimeoutMinutes $TimeoutMinutes -IsHandoverScenario $isHandoverScenario
+
+    Write-Host ''
+    Write-Host "Rehearsal monitoring result: $($monitorResult.Result) (phase: $($monitorResult.Phase))" -ForegroundColor $(if ($monitorResult.Result -eq 'Success') { 'Green' } else { 'Red' })
+    Write-Host "Artifacts harvested to: $($monitorResult.ArtifactFolder)"
+
+    # TODO(T13): unless -SkipAssertions, Test-RehearsalResult against the harvested artifacts
+    #            and in-guest state; exit non-zero with the failed-assertion summary on stderr
+    #            if any assertion fails. Until T13 lands, the exit code below reflects only
+    #            T12's own terminal-state classification, not a full assertion pass.
+    if ($SkipAssertions) {
+        Write-Host 'SkipAssertions was specified: T13 post-run assertions are not implemented yet regardless.' -ForegroundColor Yellow
+    }
+
+    $exitCode = if ($monitorResult.Result -eq 'Success') { 0 } else { 1 }
+} finally {
+    if ($KeepVm) {
+        Write-Host 'KeepVm was specified: leaving the VM and its disks in place for inspection.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'Tearing down the rehearsal VM...' -ForegroundColor Cyan
+        try {
+            Remove-RehearsalVm -VmName $VmName -VmFolder $vm.VmFolder -MediaVhdxPath $media.VhdxPath -KeepVm:$KeepVm
+        } catch {
+            Write-Warning "Remove-RehearsalVm failed (VM/disks may need manual cleanup): $($_.Exception.Message)"
+        }
+    }
+}
+
+exit $exitCode

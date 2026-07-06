@@ -1222,6 +1222,7 @@ function New-RehearsalMedia {
             VolumeLabel  = $VolumeLabel
             Scenario     = $Scenario
             MergedConfig = $mergedConfig
+            OsitPassword = $ositPassword
         }
     } finally {
         # Always attempted, even on error above (task spec: "Dismount cleanly ... even on
