@@ -43,6 +43,10 @@
         Tests\Unit\RehearsalMonitoring.Tests.ps1.
 #>
 
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'This is a bench-technician-facing rehearsal harness; the colored console progress output (setup-exit detection, guest polling, artifact harvest) is the primary UX for the person watching a rehearsal run, alongside the structured artifacts it writes to disk.')]
+[CmdletBinding()]
+param()
+
 Set-StrictMode -Version 2.0
 
 function Get-RehearsalTerminalState {
@@ -417,6 +421,7 @@ function Copy-RehearsalArtifacts {
             still-startable) guest reachable via PowerShell Direct to harvest files from, and a
             real WMI screenshot capture.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSUseUsingScopeModifierInNewRunspaces', '', Justification = 'The Invoke-Command -Session scriptblock below declares its own param(Label, IsHandover, HandoverPath) and receives them via -ArgumentList; these are the scriptblock''s own local parameters, not host-scope variables captured by closure, so $using: does not apply here.')]
     [CmdletBinding()]
     [OutputType([string])]
     param(
