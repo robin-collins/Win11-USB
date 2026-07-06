@@ -1,0 +1,98 @@
+name: CI
+
+# Tier 3 of the three-tier test bench (see FABLE_TASKS.md): cheap, on-every-PR checks that
+# catch syntax errors, analyzer findings, broken helpers, and invalid unattend XML before a
+# change ever reaches a client's notebook.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  # PSScriptAnalyzer 1.25.0+ and Pester 5.x are pinned explicitly below because the Windows
+  # GitHub-hosted runners still ship old defaults (PSScriptAnalyzer is not preinstalled at all;
+  # Windows PowerShell 5.1 ships Pester 3.4, which must be superseded, not merely imported).
+  PSSCRIPTANALYZER_MIN_VERSION: '1.25.0'
+  PESTER_MIN_VERSION: '5.0.0'
+
+jobs:
+  lint:
+    name: Lint (PSScriptAnalyzer)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ubuntu-latest ships pwsh already; only the PSScriptAnalyzer module needs installing.
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -MinimumVersion $env:PSSCRIPTANALYZER_MIN_VERSION -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module PSScriptAnalyzer -MinimumVersion $env:PSSCRIPTANALYZER_MIN_VERSION -Force
+          Get-Module -ListAvailable PSScriptAnalyzer | Select-Object Name, Version | Format-Table -AutoSize
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          if ($results) {
+            $results | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
+            Write-Output "PSScriptAnalyzer found $($results.Count) finding(s)."
+            exit 1
+          }
+          Write-Output 'PSScriptAnalyzer: zero findings.'
+
+  unit:
+    name: Unit tests (${{ matrix.os }}, ${{ matrix.shell }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pwsh 7 on Linux and Windows, plus Windows PowerShell 5.1 -- the deployment
+          # toolkit's actual runtime on a client notebook (Set-StrictMode -Version 2.0
+          # conventions must hold there too, per FABLE_TASKS.md's standing constraints).
+          - os: ubuntu-latest
+            shell: pwsh
+          - os: windows-latest
+            shell: pwsh
+          - os: windows-latest
+            shell: powershell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Windows PowerShell 5.1 ships Pester 3.4.4 by default; -MinimumVersion 5.0.0 forces a
+      # real Pester 5.x install rather than silently reusing the stale in-box module.
+      - name: Install Pester
+        shell: ${{ matrix.shell }}
+        run: |
+          Install-Module -Name Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force
+          Get-Module -ListAvailable Pester | Select-Object Name, Version | Format-Table -AutoSize
+
+      - name: Run Pester unit tests
+        shell: ${{ matrix.shell }}
+        run: |
+          Import-Module Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force
+          $result = Invoke-Pester -Path Tests/Unit -Output Detailed -CI -PassThru
+          if ($result.FailedCount -gt 0) {
+            Write-Output "Pester reported $($result.FailedCount) failed test(s) out of $($result.TotalCount)."
+            exit 1
+          }
+
+  unattend:
+    name: Validate-Unattend -Ci
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Validate-Unattend.ps1 -Ci
+        shell: bash
+        env:
+          # CI-only dummy value -- never a real secret. -Ci never prompts, so
+          # OSIT_LOCAL_ADMIN_PASSWORD must be present in the environment before it runs.
+          OSIT_LOCAL_ADMIN_PASSWORD: 'CI-Only-Dummy-Passw0rd!'
+        run: pwsh -File Validate-Unattend.ps1 -Ci

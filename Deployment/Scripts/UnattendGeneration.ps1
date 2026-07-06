@@ -15,6 +15,7 @@
         answer file and diskpart script a machine actually boots from.
 #>
 
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'The wipe/no-wipe banners here are deliberate, colored technician-facing warnings shown at generation time (both from Initialize-UsbDeployment.ps1''s interactive run and Validate-Unattend.ps1''s console output) about whether the produced media will destructively partition a disk; this is intentional interactive CLI UX, not library output.')]
 [CmdletBinding()]
 param()
 
@@ -138,6 +139,7 @@ function Merge-AutounattendTemplate {
     # straight to a target file) and New-GeneratedUnattendContent (returns content in memory, e.g.
     # for Validate-Unattend.ps1 -Ci to write into a temp folder). Kept as one function so both
     # callers apply exactly the same substitution and validation.
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingPlainTextForPassword', 'Password', Justification = 'The password is escaped directly into Autounattend.xml as plaintext (the unattend schema''s own AutoLogon/LocalAccount format requires plaintext or a documented "obfuscated" base64+padding that is not actually secure). There is no SecureString path into an XML text node.')]
     param(
         [Parameter(Mandatory = $true)][string]$TemplateContent,
         [Parameter(Mandatory = $true)][string]$Password,
@@ -180,6 +182,7 @@ function New-GeneratedUnattendContent {
             resolved deployment config hashtable (as returned by Get-DeploymentConfig in
             Common.ps1). Returns content only; callers decide where (if anywhere) to write it.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingPlainTextForPassword', 'Password', Justification = 'The password is escaped directly into Autounattend.xml as plaintext (the unattend schema''s own AutoLogon/LocalAccount format requires plaintext or a documented "obfuscated" base64+padding that is not actually secure). There is no SecureString path into an XML text node.')]
     param(
         [Parameter(Mandatory = $true)][string]$TemplatePath,
         [Parameter(Mandatory = $true)][hashtable]$Config,
