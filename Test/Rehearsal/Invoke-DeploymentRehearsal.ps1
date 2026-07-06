@@ -9,18 +9,21 @@
         Education bench machine with Hyper-V enabled -- never on a client notebook, and this
         folder is never copied onto a production deployment USB.
 
-        This script (T09) provides the parameter surface and prerequisite gate only. Later
-        tasks fill in the rehearsal body in RehearsalCommon.ps1 and wire it in here:
+        Built up in stages (RehearsalCommon.ps1, RehearsalMonitoring.ps1, RehearsalAssertions.ps1
+        each add their own layer, all dot-sourced by this entry point):
+          - T09 provided the parameter surface and prerequisite gate.
           - T10 New-RehearsalMedia       : build the "USB" VHDX (label 1S-WIN11) and run the
                                             real Initialize-UsbDeployment.ps1 against it.
           - T11 New-RehearsalVm /
                 Remove-RehearsalVm /
                 Checkpoint-Rehearsal      : Gen-2 VM lifecycle, vTPM + Secure Boot, checkpoints.
-          - T12                          : guest monitoring (WinPE heartbeat, PowerShell Direct
+          - T12 Invoke-RehearsalMonitoring: guest monitoring (WinPE heartbeat, PowerShell Direct
                                             polling of deployment_state.json) + artifact harvest.
-          - T13 Test-RehearsalResult      : post-run assertion suite, honours -SkipAssertions.
-        Until those land, a passing prerequisite check simply prints the resolved rehearsal
-        plan and exits 0; no VM is created and no media is built.
+          - T13 Test-RehearsalResult      : post-run assertion suite (completion, credential
+                                            scrub, identity, config effects, disk layout); the
+                                            exit code below reflects its Passed verdict unless
+                                            -SkipAssertions was given, in which case the exit
+                                            code reflects only T12's own terminal-state result.
 
     .PARAMETER IsoPath
         Path to the Windows 11 ISO Windows Setup boots from (attached as a virtual DVD drive).
@@ -58,8 +61,9 @@
         Skip teardown of the VM and its disks after the run (for post-mortem inspection).
 
     .PARAMETER SkipAssertions
-        Skip the T13 post-run assertion suite; still builds media, runs the VM, and harvests
-        artifacts.
+        Skip the T13 post-run assertion suite (Test-RehearsalResult is never called); still
+        builds media, runs the VM, and harvests artifacts. The exit code then reflects only
+        T12's own terminal-state classification instead of a full assertion pass.
 
     .NOTES
         Requires pwsh 7+ on Windows with Hyper-V. Will not run a real rehearsal on this
@@ -98,6 +102,7 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 . (Join-Path $scriptRoot 'RehearsalCommon.ps1')
 . (Join-Path $scriptRoot 'RehearsalMonitoring.ps1')
+. (Join-Path $scriptRoot 'RehearsalAssertions.ps1')
 
 # New-RehearsalMedia (RehearsalCommon.ps1) dot-sources Deployment\Scripts\Common.ps1 lazily,
 # but it does so *inside its own function scope*, which is torn down when that function
@@ -195,15 +200,41 @@ try {
     Write-Host "Rehearsal monitoring result: $($monitorResult.Result) (phase: $($monitorResult.Phase))" -ForegroundColor $(if ($monitorResult.Result -eq 'Success') { 'Green' } else { 'Red' })
     Write-Host "Artifacts harvested to: $($monitorResult.ArtifactFolder)"
 
-    # TODO(T13): unless -SkipAssertions, Test-RehearsalResult against the harvested artifacts
-    #            and in-guest state; exit non-zero with the failed-assertion summary on stderr
-    #            if any assertion fails. Until T13 lands, the exit code below reflects only
-    #            T12's own terminal-state classification, not a full assertion pass.
     if ($SkipAssertions) {
-        Write-Host 'SkipAssertions was specified: T13 post-run assertions are not implemented yet regardless.' -ForegroundColor Yellow
-    }
+        # -SkipAssertions: keep the pre-T13 behaviour exactly -- exit code reflects only T12's
+        # own terminal-state classification, and Test-RehearsalResult is never called.
+        Write-Host 'SkipAssertions was specified: skipping the T13 post-run assertion suite.' -ForegroundColor Yellow
+        $exitCode = if ($monitorResult.Result -eq 'Success') { 0 } else { 1 }
+    } else {
+        Write-Host ''
+        Write-Host 'Running post-run assertion suite (T13)...' -ForegroundColor Cyan
+        $assertionResult = Test-RehearsalResult -VmName $VmName -Credential $ositCredential -ArtifactFolder $monitorResult.ArtifactFolder -MergedConfig $media.MergedConfig -DiskNumber ([int]$media.MergedConfig.wipe_repartition_disk_id)
 
-    $exitCode = if ($monitorResult.Result -eq 'Success') { 0 } else { 1 }
+        Write-Host ''
+        foreach ($assertion in $assertionResult.Results) {
+            $assertionColor = if ($assertion.Status -eq 'Pass') { 'Green' } else { 'Red' }
+            Write-Host "[$($assertion.Status)] $($assertion.Name) - $($assertion.Message)" -ForegroundColor $assertionColor
+        }
+        Write-Host ''
+        Write-Host "Assertion report written to: $($assertionResult.ReportPath)"
+        Write-Host "Assertions: $($assertionResult.Summary.Passed)/$($assertionResult.Summary.Total) passed" -ForegroundColor $(if ($assertionResult.Passed) { 'Green' } else { 'Red' })
+
+        # Exit contract (FABLE_TASKS.md T13): exit 0 only when every assertion passed. On any
+        # failure, the failed-assertion summary goes to stderr (via [Console]::Error, not
+        # Write-Error -- $ErrorActionPreference is 'Stop' at the top of this script, and
+        # Write-Error would be promoted to a terminating error and abort before `exit $exitCode`
+        # below ever runs) so a CI/scheduled-task caller can capture it without parsing stdout.
+        if ($assertionResult.Passed) {
+            $exitCode = 0
+        } else {
+            $exitCode = 1
+            $failedAssertions = @($assertionResult.Results | Where-Object { $_.Status -ne 'Pass' })
+            [Console]::Error.WriteLine('Rehearsal FAILED: one or more post-run assertions did not pass.')
+            foreach ($failure in $failedAssertions) {
+                [Console]::Error.WriteLine(" - $($failure.Name): $($failure.Message)")
+            }
+        }
+    }
 } finally {
     if ($KeepVm) {
         Write-Host 'KeepVm was specified: leaving the VM and its disks in place for inspection.' -ForegroundColor Yellow
