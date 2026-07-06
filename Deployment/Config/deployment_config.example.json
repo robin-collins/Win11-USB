@@ -8,6 +8,14 @@
   "windows_image_name": "Windows 11 Pro",
   "require_ac_power": true,
   "require_internet": true,
+  "msp_wifi_setup": {
+    "enabled": true,
+    "ssid": "OneSolution",
+    "password_env_var": "OSIT_WIFI_PASSWORD",
+    "authentication": "WPA2PSK",
+    "encryption": "AES",
+    "connect_timeout_seconds": 60
+  },
   "windows_update_max_cycles": 5,
   "computer_name_mode": "prompt",
   "computer_name_prefix": "NB",

@@ -66,9 +66,9 @@ foreach ($dir in $requiredDirs) {
 $requiredScripts = @(
     'Start-Deployment.ps1', 'Invoke-PreflightChecks.ps1', 'Install-WindowsUpdates.ps1',
     'Install-ModelDrivers.ps1', 'Install-WingetApps.ps1', 'Install-DattoRmm.ps1',
-    'Install-LocalApps.ps1', 'Configure-PowerSettings.ps1', 'Configure-DesktopItems.ps1',
-    'Get-AssetInventory.ps1', 'Write-DeploymentReport.ps1', 'Resume-Deployment.ps1',
-    'Common.ps1'
+    'Install-LocalApps.ps1', 'Configure-MspWifi.ps1', 'Configure-PowerSettings.ps1',
+    'Configure-DesktopItems.ps1', 'Get-AssetInventory.ps1', 'Write-DeploymentReport.ps1',
+    'Resume-Deployment.ps1', 'Common.ps1'
 )
 foreach ($script in $requiredScripts) {
     $scriptPath = Join-Path $paths.Scripts $script

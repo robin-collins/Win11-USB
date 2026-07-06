@@ -86,6 +86,8 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 .\Initialize-UsbDeployment.ps1
 ```
 
+Initialisation refreshes toolkit-controlled files every time. Existing USB `Deployment\Logs` and `Deployment\Reports` are preserved, while `Deployment\State` is cleared so the next deployment starts with no stale resume state.
+
 If you are preparing files in a staging folder and want to target a known USB path:
 
 ```powershell
@@ -116,6 +118,7 @@ Important `deployment_config.json` options:
 - `windows_image_name`: image name to install from the USB. Default is `Windows 11 Pro`.
 - `require_ac_power`: fail preflight on battery power for notebooks.
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
+- `msp_wifi_setup`: connects to MSP WiFi SSID `OneSolution` before preflight internet checks. Password comes from `OSIT_WIFI_PASSWORD`.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
 - `configure_power_settings`: sets power timeouts before long-running update and install stages.
@@ -141,6 +144,8 @@ The OSIT password is not stored in `deployment_config.json`. `Initialize-UsbDepl
 - `.env` in the toolkit folder: `OSIT_LOCAL_ADMIN_PASSWORD=...`
 
 If neither exists, `Initialize-UsbDeployment.ps1` prompts to create one.
+
+When `msp_wifi_setup.enabled=true`, the OneSolution WiFi password is also not stored in JSON. `Initialize-UsbDeployment.ps1` reads `OSIT_WIFI_PASSWORD` from the environment or `.env`, then writes it to the USB-root `.env` so `Configure-MspWifi.ps1` can connect before preflight internet checks.
 
 Example additional local account config:
 
@@ -259,6 +264,8 @@ To let the validator install the ADK packages with winget when the schema DLL is
 This uses winget IDs `Microsoft.WindowsADK` and `Microsoft.WindowsADK.WinPEAddon`.
 
 The `windowsPE` pass is the Windows Setup phase that runs inside Windows PE before the installed operating system is applied. This toolkit uses it only in generated answer files when `wipe_repartition_drive=true`, because that is where disk wipe, GPT partitioning, and image install target settings must be applied.
+
+If Windows Setup fails before wiping the disk with `0x80004005 - 0x40030`, regenerate the USB files with `Initialize-UsbDeployment.ps1` and validate the USB-root answer file. This can happen when the generated `windowsPE` command is malformed or an older `Autounattend.xml` remains on the USB.
 
 ## Driver Folders
 

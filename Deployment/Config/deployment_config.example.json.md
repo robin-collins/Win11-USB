@@ -24,9 +24,23 @@ The active deployment script merges this config with built-in defaults. Values i
 | --- | --- | --- | --- |
 | `require_ac_power` | boolean | `true` | If `true`, preflight fails on notebooks that appear to be running on battery. |
 | `require_internet` | boolean | `true` | If `true`, preflight fails when internet connectivity checks fail. Required for Windows Update, winget, PSWindowsUpdate bootstrap, and Datto download. |
+| `msp_wifi_setup` | object | see below | Optional early WiFi bootstrap used to connect to the MSP WiFi before preflight internet checks. |
 | `fail_on_windows_home` | boolean | `true` | If `true`, preflight fails when the installed Windows edition appears to be Home/Core rather than Pro or higher. |
 | `allow_continue_without_ac` | boolean | `false` | If `true`, a notebook on battery produces a warning instead of a failure. |
 | `allow_continue_with_pending_reboot` | boolean | `false` | If `true`, an existing pending reboot produces a warning instead of a failure. Normally keep this `false`. |
+
+### msp_wifi_setup keys
+
+| Key | Type | Example | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Enables the MSP WiFi setup step before preflight. |
+| `ssid` | string | `"OneSolution"` | WiFi SSID to create/connect. |
+| `password_env_var` | string | `"OSIT_WIFI_PASSWORD"` | Secret name used for the WiFi password. The documented standard is `OSIT_WIFI_PASSWORD`. |
+| `authentication` | string | `"WPA2PSK"` | WLAN profile authentication mode. |
+| `encryption` | string | `"AES"` | WLAN profile encryption mode. |
+| `connect_timeout_seconds` | number | `60` | Maximum time to wait for the WiFi connection. |
+
+The WiFi password is not stored in JSON. `Initialize-UsbDeployment.ps1` reads `OSIT_WIFI_PASSWORD` from the environment or `.env`, then writes it to the USB-root `.env` so the target machine can connect before internet-dependent stages.
 
 ## Computer Name
 

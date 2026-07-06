@@ -8,6 +8,14 @@
   "windows_image_name": "Windows 11 Pro",
   "require_ac_power": true,
   "require_internet": true,
+  "msp_wifi_setup": {
+    "enabled": true,
+    "ssid": "OneSolution",
+    "password_env_var": "OSIT_WIFI_PASSWORD",
+    "authentication": "WPA3SAE",
+    "encryption": "AES",
+    "connect_timeout_seconds": 60
+  },
   "windows_update_max_cycles": 15,
   "computer_name_mode": "prompt",
   "computer_name_prefix": "PI",
@@ -22,18 +30,7 @@
   "osit_local_admin_username": "OSIT",
   "osit_local_admin_full_name": "OSIT Local Administrator",
   "osit_local_admin_description": "Primary OSIT local administrator account",
-  "additional_local_users": [
-    {
-      "username": "TechSupport",
-      "full_name": "Technician Support",
-      "description": "Optional technician support account",
-      "groups": [ "Administrators" ],
-      "password_mode": "prompt",
-      "password_never_expires": true,
-      "enabled": false,
-      "primary_setup_user": false
-    }
-  ],
+  "additional_local_users": [],
   "configure_desktop_items": true,
   "desktop_items": {
     "manage_common_desktop": true,
@@ -56,6 +53,6 @@
   "allow_continue_without_ac": false,
   "allow_continue_with_pending_reboot": false,
   "pswindowsupdate_bootstrap": true,
-  "winget_bootstrap": false,
+  "winget_bootstrap": true,
   "windows_update_include_microsoft_update": true
 }

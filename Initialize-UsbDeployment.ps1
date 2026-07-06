@@ -77,6 +77,54 @@ function Resolve-OsitPasswordForInitialisation {
     return $plain
 }
 
+function Resolve-OsitWifiPasswordForInitialisation {
+    param(
+        [string]$SourceRoot,
+        [string]$UsbRoot
+    )
+
+    $password = Get-OsitWifiPassword -SearchRoots @($SourceRoot, $UsbRoot)
+    if (-not [string]::IsNullOrWhiteSpace($password)) { return $password }
+
+    Write-Host ''
+    Write-Host 'OSIT_WIFI_PASSWORD was not found in the environment or a .env file.' -ForegroundColor Yellow
+    Write-Host 'MSP WiFi setup is enabled and needs this password to connect to OneSolution during deployment.' -ForegroundColor Yellow
+    Write-Host 'D) Create or update .env in this toolkit folder'
+    Write-Host 'E) Create or update the current user environment variable'
+    Write-Host 'Q) Quit without writing the WiFi password'
+
+    do {
+        $choice = (Read-Host 'Choose D, E, or Q').Trim().ToUpperInvariant()
+    } until ($choice -in @('D', 'E', 'Q'))
+
+    if ($choice -eq 'Q') { throw 'OSIT WiFi password initialisation cancelled.' }
+
+    $secure = Read-Host 'Enter the OneSolution WiFi password' -AsSecureString
+    $plain = ConvertFrom-SecureStringToPlainText -SecureString $secure
+    if ([string]::IsNullOrWhiteSpace($plain)) { throw 'OSIT WiFi password cannot be empty.' }
+
+    if ($choice -eq 'D') {
+        $envPath = Join-Path $SourceRoot '.env'
+        Set-DotEnvSecret -Path $envPath -Name 'OSIT_WIFI_PASSWORD' -Value $plain
+        Write-Host ".env updated at $envPath" -ForegroundColor Green
+    } else {
+        [Environment]::SetEnvironmentVariable('OSIT_WIFI_PASSWORD', $plain, 'User')
+        [Environment]::SetEnvironmentVariable('OSIT_WIFI_PASSWORD', $plain, 'Process')
+        Write-Host 'User environment variable OSIT_WIFI_PASSWORD has been set.' -ForegroundColor Green
+    }
+
+    return $plain
+}
+
+function Test-MspWifiSetupEnabled {
+    param([hashtable]$Config)
+
+    if (-not $Config.ContainsKey('msp_wifi_setup') -or $null -eq $Config.msp_wifi_setup) { return $false }
+    $wifiConfig = ConvertTo-PlainHashtable $Config.msp_wifi_setup
+    if ($wifiConfig.ContainsKey('enabled')) { return [bool]$wifiConfig.enabled }
+    return $true
+}
+
 function ConvertTo-XmlText {
     param([AllowEmptyString()][string]$Value)
     return [System.Security.SecurityElement]::Escape($Value)
@@ -111,22 +159,28 @@ function New-WindowsPeSettingsBlock {
         'clean',
         'convert gpt',
         "create partition efi size=$efiSize",
-        'format quick fs=fat32 label="System"',
-        'assign letter="S"',
+        'format quick fs=fat32 label=System',
+        'assign letter=S',
         "create partition msr size=$msrSize",
         'create partition primary',
         "shrink desired=$recoverySize minimum=$recoverySize",
-        'format quick fs=ntfs label="Windows"',
-        'assign letter="C"',
+        'format quick fs=ntfs label=Windows',
+        'assign letter=C',
         'create partition primary',
-        'format quick fs=ntfs label="Windows RE tools"',
-        'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"',
+        'format quick fs=ntfs label=WinRE',
+        'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac',
         'gpt attributes=0x8000000000000001',
         'list volume'
     )
 
-    $echoLines = ($diskPartCommand | ForEach-Object { 'echo ' + $_ }) -join '&'
-    $commandLine = 'cmd.exe /c "({0}) > X:\OSIT-DiskPart.txt & diskpart /s X:\OSIT-DiskPart.txt"' -f $echoLines
+    $scriptPath = 'X:\OSIT-DiskPart.txt'
+    $writeCommands = @()
+    for ($index = 0; $index -lt $diskPartCommand.Count; $index++) {
+        $redirect = if ($index -eq 0) { '>' } else { '>>' }
+        $writeCommands += ('echo {0} {1} {2}' -f $diskPartCommand[$index], $redirect, $scriptPath)
+    }
+
+    $commandLine = 'cmd.exe /c "{0} & diskpart /s {1}"' -f (($writeCommands -join ' & '), $scriptPath)
     $escapedImageName = ConvertTo-XmlText -Value $imageName
 
     return @"
@@ -193,6 +247,94 @@ function Write-PreparedAutounattend {
     if (-not $xmlValidation.unattend) { throw 'Generated Autounattend.xml did not validate as an unattend document.' }
 }
 
+function Copy-DeploymentFiles {
+    param(
+        [string]$SourceDeployment,
+        [string]$TargetDeployment
+    )
+
+    $resolvedSource = (Resolve-Path -LiteralPath $SourceDeployment -ErrorAction Stop).Path.TrimEnd('\')
+    $resolvedTarget = $null
+    if (Test-Path -LiteralPath $TargetDeployment) {
+        $resolvedTarget = (Resolve-Path -LiteralPath $TargetDeployment -ErrorAction Stop).Path.TrimEnd('\')
+    }
+
+    if ($resolvedTarget -and ($resolvedSource -ieq $resolvedTarget)) {
+        Write-Host 'Source and target Deployment paths are the same; no file copy required.' -ForegroundColor Yellow
+        return
+    }
+
+    New-Item -ItemType Directory -Path $TargetDeployment -Force | Out-Null
+
+    $sourcePrefix = $resolvedSource + '\'
+    $copiedCount = 0
+    $skippedRuntimeCount = 0
+
+    function Test-RuntimeDeploymentPath {
+        param([string]$RelativePath)
+
+        $topLevel = ($RelativePath -split '[\\/]', 2)[0]
+        return $topLevel -in @('Logs', 'Reports', 'State')
+    }
+
+    Get-ChildItem -LiteralPath $SourceDeployment -Recurse -Force -Directory -ErrorAction Stop | ForEach-Object {
+        $relativePath = $_.FullName.Substring($sourcePrefix.Length)
+        if (Test-RuntimeDeploymentPath -RelativePath $relativePath) {
+            $skippedRuntimeCount++
+        } else {
+            New-Item -ItemType Directory -Path (Join-Path $TargetDeployment $relativePath) -Force | Out-Null
+        }
+    }
+
+    Get-ChildItem -LiteralPath $SourceDeployment -Recurse -Force -File -ErrorAction Stop | ForEach-Object {
+        $relativePath = $_.FullName.Substring($sourcePrefix.Length)
+        if (Test-RuntimeDeploymentPath -RelativePath $relativePath) {
+            $skippedRuntimeCount++
+        } else {
+            $targetFile = Join-Path $TargetDeployment $relativePath
+            $targetFolder = Split-Path -Parent $targetFile
+            if (-not (Test-Path -LiteralPath $targetFolder -PathType Container)) {
+                New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
+            }
+
+            if (Test-Path -LiteralPath $targetFile -PathType Leaf) {
+                Set-ItemProperty -LiteralPath $targetFile -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+            }
+
+            Copy-Item -LiteralPath $_.FullName -Destination $targetFile -Force -ErrorAction Stop
+            $copiedCount++
+        }
+    }
+
+    Write-Host "Deployment files refreshed at $TargetDeployment ($copiedCount files overwritten or copied; $skippedRuntimeCount runtime items skipped)." -ForegroundColor Green
+}
+
+function Clear-DeploymentState {
+    param([string]$TargetDeployment)
+
+    $targetState = Join-Path $TargetDeployment 'State'
+    New-Item -ItemType Directory -Path $targetState -Force | Out-Null
+
+    $resolvedDeployment = (Resolve-Path -LiteralPath $TargetDeployment -ErrorAction Stop).Path.TrimEnd('\')
+    $resolvedState = (Resolve-Path -LiteralPath $targetState -ErrorAction Stop).Path.TrimEnd('\')
+    $expectedState = (Join-Path $resolvedDeployment 'State').TrimEnd('\')
+    if ($resolvedState -ine $expectedState) {
+        throw "Refusing to clear deployment state because the resolved path is unexpected: $resolvedState"
+    }
+
+    $stateItems = @(Get-ChildItem -LiteralPath $resolvedState -Force -ErrorAction Stop)
+    if ($stateItems.Count -eq 0) {
+        Write-Host "Deployment state is already clear at $resolvedState" -ForegroundColor Green
+        return
+    }
+
+    foreach ($item in $stateItems) {
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+    }
+
+    Write-Host "Deployment state scrubbed at $resolvedState ($($stateItems.Count) items removed)." -ForegroundColor Green
+}
+
 if ([string]::IsNullOrWhiteSpace($UsbRoot)) {
     $UsbRoot = Get-UsbRoot -VolumeLabel $VolumeLabel
 }
@@ -201,20 +343,28 @@ $paths = Initialize-DeploymentDirectories -UsbRoot $UsbRoot
 Write-Host "Deployment folder structure ensured under $UsbRoot" -ForegroundColor Green
 $deploymentConfig = Get-DeploymentConfig -UsbRoot $sourceRoot
 $ositPassword = Resolve-OsitPasswordForInitialisation -SourceRoot $sourceRoot -UsbRoot $UsbRoot
+$wifiPassword = $null
+if (Test-MspWifiSetupEnabled -Config $deploymentConfig) {
+    $wifiPassword = Resolve-OsitWifiPasswordForInitialisation -SourceRoot $sourceRoot -UsbRoot $UsbRoot
+}
 
 if (-not $SkipCopy) {
     $sourceDeployment = Join-Path $sourceRoot 'Deployment'
     $targetDeployment = Join-Path $UsbRoot 'Deployment'
-    if ((Resolve-Path -LiteralPath $sourceDeployment).Path -ne (Resolve-Path -LiteralPath $targetDeployment -ErrorAction SilentlyContinue).Path) {
-        Copy-Item -Path (Join-Path $sourceDeployment '*') -Destination $targetDeployment -Recurse -Force -ErrorAction Stop
-        Write-Host "Deployment files copied to $targetDeployment" -ForegroundColor Green
-    }
+    Copy-DeploymentFiles -SourceDeployment $sourceDeployment -TargetDeployment $targetDeployment
+    Clear-DeploymentState -TargetDeployment $targetDeployment
 
     $sourceAutounattend = Join-Path $sourceRoot 'Autounattend.xml'
     $targetAutounattend = Join-Path $UsbRoot 'Autounattend.xml'
     if (Test-Path -LiteralPath $sourceAutounattend -PathType Leaf) {
         Write-PreparedAutounattend -SourcePath $sourceAutounattend -TargetPath $targetAutounattend -Password $ositPassword -Config $deploymentConfig
         Write-Host "Autounattend.xml prepared for OSIT and written to $targetAutounattend" -ForegroundColor Green
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($wifiPassword)) {
+        $targetEnvPath = Join-Path $UsbRoot '.env'
+        Set-DotEnvSecret -Path $targetEnvPath -Name 'OSIT_WIFI_PASSWORD' -Value $wifiPassword
+        Write-Host "OSIT_WIFI_PASSWORD written to USB-root .env for MSP WiFi setup: $targetEnvPath" -ForegroundColor Green
     }
 } else {
     Write-Host 'SkipCopy was specified; deployment files and Autounattend.xml were not copied.' -ForegroundColor Yellow

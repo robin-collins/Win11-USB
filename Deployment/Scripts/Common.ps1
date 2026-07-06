@@ -163,6 +163,14 @@ function Get-DefaultDeploymentConfig {
         windows_image_name               = 'Windows 11 Pro'
         require_ac_power                 = $true
         require_internet                 = $true
+        msp_wifi_setup                   = @{
+            enabled = $true
+            ssid = 'OneSolution'
+            password_env_var = 'OSIT_WIFI_PASSWORD'
+            authentication = 'WPA2PSK'
+            encryption = 'AES'
+            connect_timeout_seconds = 60
+        }
         windows_update_max_cycles        = 5
         computer_name_mode               = 'prompt'
         computer_name_prefix             = 'NB'
@@ -787,6 +795,25 @@ function Get-OsitLocalAdminPassword {
         if ([string]::IsNullOrWhiteSpace($root)) { continue }
         $envPath = Join-Path $root '.env'
         $value = Get-DotEnvValue -Path $envPath -Name 'OSIT_LOCAL_ADMIN_PASSWORD'
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+
+    return $null
+}
+
+function Get-OsitWifiPassword {
+    [CmdletBinding()]
+    param([string[]]$SearchRoots = @())
+
+    foreach ($target in @('Process', 'User', 'Machine')) {
+        $value = [Environment]::GetEnvironmentVariable('OSIT_WIFI_PASSWORD', $target)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+
+    foreach ($root in $SearchRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $envPath = Join-Path $root '.env'
+        $value = Get-DotEnvValue -Path $envPath -Name 'OSIT_WIFI_PASSWORD'
         if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
     }
 

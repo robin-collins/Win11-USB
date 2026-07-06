@@ -118,7 +118,7 @@ function Get-Schema {
     throw "Unattend schema resource was not found in $Path"
 }
 
-function Find-UnattendSchemaDll {
+function Get-UnattendSchemaDllCandidates {
     $candidateNames = @(
         'Microsoft.ComponentStudio.ComponentPlatformInterface.dll',
         'microsoft.componentstudio.componentplatforminterface.dll'
@@ -130,13 +130,62 @@ function Find-UnattendSchemaDll {
         "$env:ProgramFiles\Windows AIK"
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
 
+    $preferredArchitecture = if ([Environment]::Is64BitProcess) { 'amd64' } else { 'x86' }
+    $candidateMatches = @()
     foreach ($root in $roots) {
         foreach ($name in $candidateNames) {
-            $match = Get-ChildItem -LiteralPath $root -Filter $name -Recurse -File -ErrorAction SilentlyContinue |
-                Sort-Object FullName -Descending |
-                Select-Object -First 1
-            if ($match) { return $match.FullName }
+            $candidateMatches += @(Get-ChildItem -LiteralPath $root -Filter $name -Recurse -File -ErrorAction SilentlyContinue)
         }
+    }
+
+    $ordered = @()
+    $ordered += @($candidateMatches |
+            Where-Object { $_.FullName -match "\\WSIM\\$([regex]::Escape($preferredArchitecture))\\" } |
+            Sort-Object FullName -Descending)
+
+    $ordered += @($candidateMatches |
+            Where-Object { $_.FullName -notmatch '\\WSIM\\arm64\\' } |
+            Sort-Object FullName -Descending)
+
+    $ordered += @($candidateMatches | Sort-Object FullName -Descending)
+
+    return @($ordered | Select-Object -ExpandProperty FullName -Unique)
+}
+
+function Find-UnattendSchemaDll {
+    return @(Get-UnattendSchemaDllCandidates | Select-Object -First 1)[0]
+}
+
+function Get-CompatibleUnattendSchema {
+    param([string[]]$CandidatePaths)
+
+    $attempted = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($candidatePath in @($CandidatePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) { continue }
+
+        $resolvedCandidate = (Resolve-Path -LiteralPath $candidatePath -ErrorAction Stop).Path
+        $attempted.Add($resolvedCandidate) | Out-Null
+        try {
+            $schemaText = Get-Schema -Path $resolvedCandidate
+            return [ordered]@{
+                path = $resolvedCandidate
+                text = $schemaText
+            }
+        } catch [System.BadImageFormatException] {
+            Add-ValidationResult -Status Warn -Check 'ADK schema DLL architecture' -Message "Skipping incompatible schema DLL for this PowerShell process: $resolvedCandidate"
+            continue
+        } catch {
+            if ($_.Exception.Message -match 'architecture is not compatible') {
+                Add-ValidationResult -Status Warn -Check 'ADK schema DLL architecture' -Message "Skipping incompatible schema DLL for this PowerShell process: $resolvedCandidate"
+                continue
+            }
+            Add-ValidationResult -Status Warn -Check 'ADK schema DLL load' -Message "Skipping schema DLL after load failure: $resolvedCandidate - $($_.Exception.Message)"
+            continue
+        }
+    }
+
+    if ($attempted.Count -gt 0) {
+        throw "No compatible ADK schema DLL could be loaded by this PowerShell process. Attempted: $($attempted -join '; ')"
     }
 
     return $null
@@ -390,12 +439,18 @@ try {
         Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install partition' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:PartitionID' -Expected '3'
 
         $runSync = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path'
-        foreach ($fragment in @('clean', 'convert gpt', 'create partition efi size=512', 'create partition msr size=16', 'shrink desired=2048 minimum=2048', 'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"', 'gpt attributes=0x8000000000000001')) {
+        foreach ($fragment in @('clean', 'convert gpt', 'create partition efi size=512', 'create partition msr size=16', 'shrink desired=2048 minimum=2048', 'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac', 'gpt attributes=0x8000000000000001')) {
             if ($runSync -match [regex]::Escape($fragment)) {
                 Add-ValidationResult -Status Pass -Check "Partition command: $fragment" -Message 'Expected partition command fragment found.'
             } else {
                 Add-ValidationResult -Status Fail -Check "Partition command: $fragment" -Message 'Expected partition command fragment missing.'
             }
+        }
+
+        if ($runSync -match 'label="' -or $runSync -match 'letter="' -or $runSync -match 'set id="') {
+            Add-ValidationResult -Status Fail -Check 'Partition command quoting' -Message 'DiskPart command contains nested quoted label, drive letter, or GUID values that can break cmd.exe parsing during windowsPE.'
+        } else {
+            Add-ValidationResult -Status Pass -Check 'Partition command quoting' -Message 'DiskPart command avoids nested quoted values inside cmd.exe payload.'
         }
     } elseif ($config -and $config.wipe_repartition_drive -eq $true -and -not $isTemplate) {
         Add-ValidationResult -Status Fail -Check 'windowsPE pass' -Message 'Config expects wipe_repartition_drive=true, but generated XML has no windowsPE pass.'
@@ -403,21 +458,35 @@ try {
         Add-ValidationResult -Status Warn -Check 'windowsPE pass' -Message 'windowsPE pass is absent. This is expected for the repository template or technician-led disk selection.'
     }
 
-    if (-not $DllPath) { $DllPath = Find-UnattendSchemaDll }
-    if (-not $DllPath -and $InstallAdkWithWinget) {
+    $schemaDllCandidates = @()
+    if ($DllPath) {
+        $schemaDllCandidates += $DllPath
+    } else {
+        $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
+    }
+
+    if ($schemaDllCandidates.Count -eq 0 -and $InstallAdkWithWinget) {
         try {
             Install-AdkPackagesWithWinget
-            $DllPath = Find-UnattendSchemaDll
+            $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
         } catch {
             Add-ValidationResult -Status Fail -Check 'ADK winget install' -Message $_.Exception.Message
         }
     }
-    if ($DllPath -and (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
+
+    if ($DllPath) {
+        $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
+        $schemaDllCandidates = @($schemaDllCandidates | Select-Object -Unique)
+    }
+
+    if ($schemaDllCandidates.Count -gt 0) {
         try {
-            $schemaText = Get-Schema -Path (Resolve-Path -LiteralPath $DllPath).Path
-            $schemaErrors = @(Test-XmlSchema -XmlPath $tempValidationFile -SchemaText $schemaText)
+            $schema = Get-CompatibleUnattendSchema -CandidatePaths $schemaDllCandidates
+            if (-not $schema) { throw 'No compatible ADK schema DLL was found.' }
+
+            $schemaErrors = @(Test-XmlSchema -XmlPath $tempValidationFile -SchemaText $schema.text)
             if ($schemaErrors.Count -eq 0) {
-                Add-ValidationResult -Status Pass -Check 'ADK schema validation' -Message "Schema validation passed using $DllPath."
+                Add-ValidationResult -Status Pass -Check 'ADK schema validation' -Message "Schema validation passed using $($schema.path)."
             } else {
                 foreach ($schemaError in $schemaErrors) {
                     Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $schemaError
