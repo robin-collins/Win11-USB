@@ -119,6 +119,53 @@ function Resolve-OsitWifiPasswordForInitialisation {
     return $plain
 }
 
+function Resolve-OsitSmtpPasswordForInitialisation {
+    param(
+        [string]$SourceRoot,
+        [string]$UsbRoot,
+        [string]$EnvVarName
+    )
+
+    $password = Get-OsitSmtpPassword -SearchRoots @($SourceRoot, $UsbRoot) -EnvVarName $EnvVarName
+    if (-not [string]::IsNullOrWhiteSpace($password)) { return $password }
+
+    Write-Host ''
+    Write-Host "$EnvVarName was not found in the environment or a .env file." -ForegroundColor Yellow
+    Write-Host 'SMTP email notification is enabled and configured with a username, so it needs this password to authenticate.' -ForegroundColor Yellow
+    Write-Host 'D) Create or update .env in this toolkit folder'
+    Write-Host 'E) Create or update the current user environment variable'
+    Write-Host 'Q) Quit without writing the SMTP password'
+
+    do {
+        $choice = (Read-Host 'Choose D, E, or Q').Trim().ToUpperInvariant()
+    } until ($choice -in @('D', 'E', 'Q'))
+
+    if ($choice -eq 'Q') { throw 'SMTP password initialisation cancelled.' }
+
+    $secure = Read-Host "Enter the SMTP password for $EnvVarName" -AsSecureString
+    $plain = ConvertFrom-SecureStringToPlainText -SecureString $secure
+    if ([string]::IsNullOrWhiteSpace($plain)) { throw 'SMTP password cannot be empty.' }
+
+    if ($choice -eq 'D') {
+        $envPath = Join-Path $SourceRoot '.env'
+        Set-DotEnvSecret -Path $envPath -Name $EnvVarName -Value $plain
+        Write-Host ".env updated at $envPath" -ForegroundColor Green
+    } else {
+        [Environment]::SetEnvironmentVariable($EnvVarName, $plain, 'User')
+        [Environment]::SetEnvironmentVariable($EnvVarName, $plain, 'Process')
+        Write-Host "User environment variable $EnvVarName has been set." -ForegroundColor Green
+    }
+
+    return $plain
+}
+
+function Test-SmtpPasswordRequired {
+    param([hashtable]$SmtpConfig)
+
+    if (-not [bool]$SmtpConfig.enabled) { return $false }
+    return -not [string]::IsNullOrWhiteSpace([string]$SmtpConfig.username)
+}
+
 function Test-MspWifiSetupEnabled {
     param([hashtable]$Config)
 
@@ -360,6 +407,13 @@ $wifiPassword = $null
 if (Test-MspWifiSetupEnabled -Config $deploymentConfig) {
     $wifiPassword = Resolve-OsitWifiPasswordForInitialisation -SourceRoot $sourceRoot -UsbRoot $UsbRoot
 }
+$smtpConfig = Get-SmtpConfig -UsbRoot $sourceRoot
+$smtpPasswordEnvVar = [string]$smtpConfig.password_env_var
+if ([string]::IsNullOrWhiteSpace($smtpPasswordEnvVar)) { $smtpPasswordEnvVar = 'OSIT_SMTP_PASSWORD' }
+$smtpPassword = $null
+if (Test-SmtpPasswordRequired -SmtpConfig $smtpConfig) {
+    $smtpPassword = Resolve-OsitSmtpPasswordForInitialisation -SourceRoot $sourceRoot -UsbRoot $UsbRoot -EnvVarName $smtpPasswordEnvVar
+}
 
 if (-not $SkipCopy) {
     $sourceDeployment = Join-Path $sourceRoot 'Deployment'
@@ -413,6 +467,12 @@ if (-not $SkipCopy) {
         $targetEnvPath = Join-Path $UsbRoot '.env'
         Set-DotEnvSecret -Path $targetEnvPath -Name 'OSIT_WIFI_PASSWORD' -Value $wifiPassword
         Write-Host "OSIT_WIFI_PASSWORD written to USB-root .env for MSP WiFi setup: $targetEnvPath" -ForegroundColor Green
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($smtpPassword)) {
+        $targetEnvPath = Join-Path $UsbRoot '.env'
+        Set-DotEnvSecret -Path $targetEnvPath -Name $smtpPasswordEnvVar -Value $smtpPassword
+        Write-Host "$smtpPasswordEnvVar written to USB-root .env for SMTP email notification: $targetEnvPath" -ForegroundColor Green
     }
 } else {
     Write-Host 'SkipCopy was specified; deployment files and Autounattend.xml were not copied.' -ForegroundColor Yellow

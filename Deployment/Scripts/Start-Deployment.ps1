@@ -310,6 +310,7 @@ function Invoke-DeploymentStep {
         }
         'MspWifiSetup' { & (Join-Path $PSScriptRoot 'Configure-MspWifi.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'Preflight' { & (Join-Path $PSScriptRoot 'Invoke-PreflightChecks.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
+        'LocalHandover' { & (Join-Path $PSScriptRoot 'Invoke-LocalHandover.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'ConfigureComputerName' { Invoke-ComputerNameStep -UsbRoot $UsbRoot -State $State -StatePath $StatePath -Config $Config }
         'CreateLocalAdmin' { Invoke-CreateLocalAdminStep -UsbRoot $UsbRoot -State $State -StatePath $StatePath -Config $Config }
         'PowerSettings' {
@@ -340,6 +341,7 @@ function Invoke-DeploymentStep {
             else { Write-Log -Level Info -Message 'Desktop item configuration is disabled by config.' }
         }
         'FinalReport' { & (Join-Path $PSScriptRoot 'Write-DeploymentReport.ps1') -UsbRoot $UsbRoot -StatePath $StatePath | Out-Null }
+        'EmailReport' { & (Join-Path $PSScriptRoot 'Send-DeploymentEmail.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'Complete' {
             Unregister-DeploymentResumeTask
             $unattendPaths = @(
@@ -379,7 +381,7 @@ if (-not $runLock.Acquired) {
 
 $paths = $null
 try {
-    if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Get-UsbRoot }
+    if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Get-DeploymentRoot }
     $paths = Initialize-DeploymentDirectories -UsbRoot $UsbRoot
     $state = Initialize-StateForRun -StatePath $paths.StateFile -Reset:$Reset -NonInteractive:$NonInteractive
     Write-DeploymentState -State $state -StatePath $paths.StateFile
@@ -413,6 +415,29 @@ try {
 
         Set-StateStepCompleted -State $state -Step $step -StatePath $paths.StateFile
         Write-Log -Level Success -Message "Completed deployment step: $step"
+
+        if ($step -eq 'LocalHandover') {
+            $state = Read-DeploymentState -StatePath $paths.StateFile
+            $handoverRoot = if ($state.ContainsKey('local_deployment_root')) { [string]$state.local_deployment_root } else { '' }
+            if (-not [string]::IsNullOrWhiteSpace($handoverRoot)) {
+                $resolvedHandoverRoot = (Resolve-Path -LiteralPath $handoverRoot -ErrorAction SilentlyContinue).Path
+                $resolvedCurrentRoot = (Resolve-Path -LiteralPath $UsbRoot -ErrorAction SilentlyContinue).Path
+                if ($resolvedHandoverRoot -and ($resolvedHandoverRoot -ine $resolvedCurrentRoot)) {
+                    # Switch the running orchestrator over to the local copy for every remaining
+                    # step (and future resumes): reopen logging there first so nothing tries to
+                    # keep writing to the USB once the technician ejects it.
+                    $newPaths = Get-DeploymentPaths -UsbRoot $handoverRoot
+                    Write-DeploymentState -State $state -StatePath $newPaths.StateFile
+                    Stop-DeploymentLogging
+                    $UsbRoot = $handoverRoot
+                    $paths = $newPaths
+                    $config = Get-DeploymentConfig -UsbRoot $UsbRoot
+                    Initialize-DeploymentLogging -UsbRoot $UsbRoot -State $state | Out-Null
+                    Write-Log -Level Success -Message "Deployment root switched to $UsbRoot after local handover. Remaining steps and resumes now use this path; the USB can be ejected."
+                    Show-DeploymentToast -Title 'Windows 11 Deployment' -Message 'Deployment moved to local disk. The USB can now be ejected.'
+                }
+            }
+        }
     }
 } catch {
     $message = $_.Exception.Message
@@ -429,6 +454,13 @@ try {
         }
     } catch {
         Write-Log -Level Error -Message "Failed to write failure report: $($_.Exception.Message)"
+    }
+    try {
+        if ($paths -and (Test-Path -LiteralPath $paths.StateFile -PathType Leaf)) {
+            & (Join-Path $PSScriptRoot 'Send-DeploymentEmail.ps1') -UsbRoot $UsbRoot -StatePath $paths.StateFile -Failure -FailureMessage $message | Out-Null
+        }
+    } catch {
+        Write-Log -Level Warn -Message "Failed to send failure notification email: $($_.Exception.Message)"
     }
     Write-Host ''
     Write-Host 'Deployment stopped. Review the log and report folders on the USB before rerunning.' -ForegroundColor Red

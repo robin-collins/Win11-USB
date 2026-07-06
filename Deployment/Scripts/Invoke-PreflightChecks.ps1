@@ -68,7 +68,7 @@ $requiredScripts = @(
     'Install-ModelDrivers.ps1', 'Install-NetworkDrivers.ps1', 'Install-WingetApps.ps1', 'Install-DattoRmm.ps1',
     'Install-LocalApps.ps1', 'Configure-MspWifi.ps1', 'Configure-PowerSettings.ps1',
     'Configure-DesktopItems.ps1', 'Get-AssetInventory.ps1', 'Write-DeploymentReport.ps1',
-    'Resume-Deployment.ps1', 'Common.ps1'
+    'Send-DeploymentEmail.ps1', 'Invoke-LocalHandover.ps1', 'Resume-Deployment.ps1', 'Common.ps1'
 )
 foreach ($script in $requiredScripts) {
     $scriptPath = Join-Path $paths.Scripts $script
@@ -99,6 +99,31 @@ if (-not [string]::IsNullOrWhiteSpace($dattoSiteId)) {
     }
 } else {
     Add-PreflightResult -Results $results -Name 'Datto RMM Site ID' -Status 'Warn' -Message 'Datto RMM site ID is blank; Datto RMM install step will be skipped.' -Data $null
+}
+
+$handoverConfig = if ($config.ContainsKey('local_deployment_handover') -and $null -ne $config.local_deployment_handover) { ConvertTo-PlainHashtable $config.local_deployment_handover } else { @{ enabled = $false } }
+if ([bool]$handoverConfig.enabled) {
+    Add-PreflightResult -Results $results -Name 'Local Deployment Handover' -Status 'Pass' -Message "Deployment files will be copied to $($handoverConfig.local_path) once network is available, so the USB can be ejected early." -Data $null
+} else {
+    Add-PreflightResult -Results $results -Name 'Local Deployment Handover' -Status 'Warn' -Message 'Local deployment handover is disabled; the USB must stay inserted for the entire deployment.' -Data $null
+}
+
+try {
+    $smtpConfig = Get-SmtpConfig -UsbRoot $UsbRoot
+    if ([bool]$smtpConfig.enabled) {
+        $smtpToAddresses = @($smtpConfig.to_addresses | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ([string]::IsNullOrWhiteSpace([string]$smtpConfig.smtp_server) -or $smtpToAddresses.Count -eq 0) {
+            # Email notification is a convenience, not a deployment gate, so a misconfiguration
+            # here warns rather than stopping a customer's laptop deployment.
+            Add-PreflightResult -Results $results -Name 'SMTP Email' -Status 'Warn' -Message 'smtp_config.json is enabled but smtp_server or to_addresses is empty; email notification will be skipped.' -Data $null
+        } else {
+            Add-PreflightResult -Results $results -Name 'SMTP Email' -Status 'Pass' -Message "Email notification configured for $($smtpToAddresses -join ', ') via $($smtpConfig.smtp_server)." -Data $null
+        }
+    } else {
+        Add-PreflightResult -Results $results -Name 'SMTP Email' -Status 'Warn' -Message 'SMTP email notification is disabled by config.' -Data $null
+    }
+} catch {
+    Add-PreflightResult -Results $results -Name 'SMTP Email' -Status 'Warn' -Message "smtp_config.json could not be read: $($_.Exception.Message)" -Data $null
 }
 
 $systemDrive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$env:SystemDrive'"
