@@ -236,7 +236,7 @@ try {
 
     foreach ($step in $steps) {
         $state = Read-DeploymentState -StatePath $paths.StateFile
-        if ($state.completed_steps -contains $step) {
+        if (@($state.completed_steps) -contains $step) {
             Write-Log -Level Info -Message "Skipping completed step: $step"
             continue
         }

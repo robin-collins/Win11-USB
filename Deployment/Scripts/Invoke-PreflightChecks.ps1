@@ -27,11 +27,11 @@ function Add-PreflightResult {
             data    = $Data
         }) | Out-Null
     if ($Status -eq 'Pass') {
-        Write-Log -Level Success -Message "$Name: $Message"
+        Write-Log -Level Success -Message "${Name}: $Message"
     } elseif ($Status -eq 'Warn') {
-        Write-Log -Level Warn -Message "$Name: $Message"
+        Write-Log -Level Warn -Message "${Name}: $Message"
     } else {
-        Write-Log -Level Error -Message "$Name: $Message"
+        Write-Log -Level Error -Message "${Name}: $Message"
     }
 }
 

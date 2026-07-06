@@ -347,12 +347,15 @@ function Add-StateHistory {
         [object]$Data
     )
 
-    if (-not $State.ContainsKey('history') -or $null -eq $State.history) { $State.history = @() }
-    $State.history += ,([ordered]@{
+    $existingHistory = @()
+    if ($State.ContainsKey('history') -and $null -ne $State.history) {
+        $existingHistory = @($State.history)
+    }
+    $State.history = @($existingHistory + ([ordered]@{
             timestamp = (Get-Date).ToString('o')
             event     = $Event
             data      = $Data
-        })
+        }))
 }
 
 function Set-StateStepStarted {
@@ -375,9 +378,14 @@ function Set-StateStepCompleted {
         [Parameter(Mandatory = $true)][string]$StatePath
     )
 
-    if (-not ($State.completed_steps -contains $Step)) {
-        $State.completed_steps += ,$Step
+    $completedSteps = @()
+    if ($State.ContainsKey('completed_steps') -and $null -ne $State.completed_steps) {
+        $completedSteps = @($State.completed_steps)
     }
+    if ($completedSteps -notcontains $Step) {
+        $completedSteps = @($completedSteps + $Step)
+    }
+    $State.completed_steps = $completedSteps
     $State.last_successful_step = $Step
     $State.current_step = ''
     $State.last_error = $null
