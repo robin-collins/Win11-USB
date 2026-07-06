@@ -8,6 +8,67 @@ $script:DeploymentTaskName = 'OneSolutionWin11DeploymentResume'
 $script:DeploymentRunMutexName = 'Global\OneSolutionWin11Deployment'
 $script:DeploymentLogContext = $null
 
+# Phase B (-DryRun) plumbing. Start-Deployment.ps1 -DryRun sets this environment variable
+# before dot-sourcing Common.ps1 (see FABLE_TASKS.md T06), so every child step script that
+# dot-sources Common.ps1 on its own inherits the mode with zero signature churn. When the
+# variable is unset (the default/production path) $script:DeploymentDryRun is $false and
+# every function below falls straight through to its original, unmodified behaviour.
+$script:DeploymentDryRun = ($env:OSIT_DEPLOYMENT_DRYRUN -eq '1')
+
+function Test-DeploymentDryRun {
+    [CmdletBinding()]
+    param()
+
+    return $script:DeploymentDryRun
+}
+
+function Get-DryRunStepName {
+    [CmdletBinding()]
+    param(
+        [hashtable]$State,
+        [string]$Default = 'Deployment'
+    )
+
+    if ($State -and $State.ContainsKey('current_step') -and $State.current_step) {
+        return [string]$State.current_step
+    }
+    return $Default
+}
+
+function Write-DryRunAction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()][hashtable]$State,
+        [Parameter(Mandatory = $true)][string]$Step,
+        [Parameter(Mandatory = $true)][string]$Action,
+        [object]$Data
+    )
+
+    Write-Log -Level Info -Message "DRYRUN [$Step] $Action"
+
+    # This is the single audit-trail helper for the whole dry-run mode: every mutating branch
+    # that gets skipped in dry-run funnels through here so T08 can aggregate one consistent
+    # collection ($State.dryrun_actions) into the summary report, instead of every step
+    # inventing its own log shape.
+    $record = [ordered]@{
+        timestamp = (Get-Date).ToString('o')
+        step      = $Step
+        action    = $Action
+        data      = $Data
+    }
+
+    if ($State) {
+        $existingActions = @()
+        if ($State.ContainsKey('dryrun_actions') -and $null -ne $State.dryrun_actions) {
+            $existingActions = @($State.dryrun_actions)
+        }
+        $State.dryrun_actions = @($existingActions + $record)
+    }
+    # Deliberately no return value: every call site below invokes this as a bare statement
+    # (matching the Add-StateHistory convention), and a returned value here would otherwise
+    # leak into that caller's own output/return stream.
+}
+
 function Get-DeploymentSteps {
     @(
         'NetworkDrivers',
@@ -101,6 +162,9 @@ function Get-DeploymentPaths {
     param([Parameter(Mandatory = $true)][string]$UsbRoot)
 
     $root = (Resolve-Path -LiteralPath $UsbRoot -ErrorAction Stop).Path
+    # State isolation invariant: a dry run must never read or write a real deployment's state
+    # file, so it gets a shadow file name instead of the production one.
+    $stateFileName = if (Test-DeploymentDryRun) { 'deployment_state.dryrun.json' } else { 'deployment_state.json' }
     @{
         UsbRoot     = $root
         Deployment  = Join-Path $root 'Deployment'
@@ -115,7 +179,7 @@ function Get-DeploymentPaths {
         Drivers     = Join-Path $root 'Deployment\Drivers'
         NetworkDrivers = Join-Path $root 'Deployment\Drivers\Network'
         Tools       = Join-Path $root 'Deployment\Tools'
-        StateFile   = Join-Path $root 'Deployment\State\deployment_state.json'
+        StateFile   = Join-Path $root ('Deployment\State\' + $stateFileName)
         ConfigFile  = Join-Path $root 'Deployment\Config\deployment_config.json'
         WingetFile  = Join-Path $root 'Deployment\Config\winget_packages.json'
         LocalFile   = Join-Path $root 'Deployment\Config\local_apps.json'
@@ -624,7 +688,10 @@ function Initialize-DeploymentLogging {
     $identity = Get-DeviceIdentity
     $safeDevice = Get-DeviceFolderName -Identity $identity
     $runId = $State.deployment_run_id
-    $logDir = Join-Path (Join-Path $paths.Logs $safeDevice) $runId
+    # State isolation invariant: dry-run logs live in their own dryrun-<runid> folder so they
+    # are never mixed in with (or mistaken for) a real deployment's transcript/events.
+    $runFolderName = if (Test-DeploymentDryRun) { "dryrun-$runId" } else { $runId }
+    $logDir = Join-Path (Join-Path $paths.Logs $safeDevice) $runFolderName
     New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
 
     $transcriptPath = Join-Path $logDir 'transcript.log'
@@ -734,8 +801,32 @@ function Invoke-ExternalCommand {
         [string[]]$Arguments = @(),
         [int[]]$AllowedExitCodes = @(0),
         [string]$WorkingDirectory = $PWD.Path,
-        [string]$LogName
+        [string]$LogName,
+        # Caller asserts this specific invocation mutates nothing (e.g. `robocopy /L`,
+        # `winget list`). Read-only commands execute for real even in dry-run, because the
+        # scan/detection value is why dry-run runs them at all.
+        [switch]$ReadOnly,
+        [hashtable]$State
     )
+
+    $argumentLine = ConvertTo-ProcessArgumentString -Arguments $Arguments
+
+    if ((Test-DeploymentDryRun) -and -not $ReadOnly) {
+        # Refuse to execute: log exactly what would have run and hand back a synthetic result
+        # shaped like a real success so callers do not need dry-run-specific branches.
+        Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'ExternalCommand') -Action "would run: $FilePath $argumentLine" -Data ([ordered]@{
+                file_path         = $FilePath
+                arguments         = $Arguments
+                working_directory = $WorkingDirectory
+            })
+        return [ordered]@{
+            file_path = $FilePath
+            arguments = $Arguments
+            exit_code = 0
+            stdout    = ''
+            stderr    = ''
+        }
+    }
 
     if (-not (Get-Command $FilePath -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
         throw "Executable not found: $FilePath"
@@ -744,7 +835,6 @@ function Invoke-ExternalCommand {
     $tempBase = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString('N'))
     $stdoutPath = "$tempBase.out"
     $stderrPath = "$tempBase.err"
-    $argumentLine = ConvertTo-ProcessArgumentString -Arguments $Arguments
 
     Write-Log -Level Info -Message "Running: $FilePath $argumentLine"
     $startParams = @{
@@ -875,7 +965,8 @@ function Register-DeploymentResumeTask {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$UsbRoot,
-        [string]$TriggerUsername
+        [string]$TriggerUsername,
+        [hashtable]$State
     )
 
     $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
@@ -885,6 +976,15 @@ function Register-DeploymentResumeTask {
     }
 
     if ([string]::IsNullOrWhiteSpace($TriggerUsername)) { $TriggerUsername = $env:USERNAME }
+
+    if (Test-DeploymentDryRun) {
+        Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'ResumeTask') -Action "would register resume scheduled task '$script:DeploymentTaskName' for '$TriggerUsername'" -Data ([ordered]@{
+                usb_root         = $UsbRoot
+                trigger_username = $TriggerUsername
+                resume_script    = $resumeScript
+            })
+        return
+    }
 
     # A logon trigger built from "COMPUTERNAME\User" resolves to a SID at registration time,
     # but ConfigureComputerName's own reboot can rename the computer at the same reboot this
@@ -927,7 +1027,12 @@ function Register-DeploymentResumeTask {
 
 function Unregister-DeploymentResumeTask {
     [CmdletBinding()]
-    param()
+    param([hashtable]$State)
+
+    if (Test-DeploymentDryRun) {
+        Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'ResumeTask') -Action "would unregister resume scheduled task: $script:DeploymentTaskName" -Data @{ task_name = $script:DeploymentTaskName }
+        return
+    }
 
     try {
         if (Get-ScheduledTask -TaskName $script:DeploymentTaskName -ErrorAction SilentlyContinue) {
@@ -941,7 +1046,10 @@ function Unregister-DeploymentResumeTask {
 
 function Enable-DeploymentAutoLogon {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$UsbRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$UsbRoot,
+        [hashtable]$State
+    )
 
     # Autounattend's AutoLogon only fires once (LogonCount=1), covering the very first boot
     # after Windows install. Every later deployment-triggered reboot (rename, Windows Update)
@@ -958,6 +1066,14 @@ function Enable-DeploymentAutoLogon {
     if ([string]::IsNullOrWhiteSpace($password)) {
         Write-Log -Level Warn -Message "OSIT password was not found; cannot enable automatic logon for the next reboot. A technician must log on as $username manually to resume."
         return $null
+    }
+
+    if (Test-DeploymentDryRun) {
+        # Deliberately omit the plaintext password from the recorded data even though the
+        # real branch below would write it to the registry; the dry-run audit trail must not
+        # itself become a place a credential leaks.
+        Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'AutoLogon') -Action "would enable automatic logon for '$username' on next reboot" -Data @{ username = $username }
+        return $username
     }
 
     try {
@@ -980,6 +1096,8 @@ function Show-DeploymentToast {
         [Parameter(Mandatory = $true)][string]$Title,
         [Parameter(Mandatory = $true)][string]$Message
     )
+
+    if (Test-DeploymentDryRun) { $Title = "[DRY RUN] $Title" }
 
     # Best-effort only: toasts are a convenience for the technician, not a deployment
     # requirement. A missing WinRT type (non-interactive/SYSTEM session, older PowerShell)
@@ -1025,7 +1143,12 @@ function Enter-DeploymentRunLock {
     [CmdletBinding()]
     param()
 
-    $mutex = New-Object System.Threading.Mutex($false, $script:DeploymentRunMutexName)
+    # State isolation invariant: a dry run must never block, or be blocked by, a real
+    # deployment's run lock, so it takes out a differently-named mutex entirely.
+    $mutexName = $script:DeploymentRunMutexName
+    if (Test-DeploymentDryRun) { $mutexName += '-DryRun' }
+
+    $mutex = New-Object System.Threading.Mutex($false, $mutexName)
     $acquired = $false
     try {
         $acquired = $mutex.WaitOne(0)
@@ -1060,6 +1183,20 @@ function Request-DeploymentReboot {
     $State.reboot_pending = $true
     Add-StateHistory -State $State -Event 'reboot_requested' -Data @{ reason = $Reason; current_step = $State.current_step }
     Write-DeploymentState -State $State -StatePath $StatePath
+
+    if (Test-DeploymentDryRun) {
+        # A dry run must be able to walk every step in a single pass, so a reboot point
+        # becomes a logged, recorded no-op instead of actually restarting or exiting.
+        $existingReboots = @()
+        if ($State.ContainsKey('dryrun_reboots') -and $null -ne $State.dryrun_reboots) {
+            $existingReboots = @($State.dryrun_reboots)
+        }
+        $State.dryrun_reboots = @($existingReboots + $Reason)
+        Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'Reboot') -Action "would reboot: $Reason" -Data @{ reason = $Reason }
+        Write-DeploymentState -State $State -StatePath $StatePath
+        return
+    }
+
     $autoLogonUser = Enable-DeploymentAutoLogon -UsbRoot $UsbRoot
     Register-DeploymentResumeTask -UsbRoot $UsbRoot -TriggerUsername $autoLogonUser
     Write-Log -Level Warn -Message "Reboot required: $Reason"
