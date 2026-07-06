@@ -1,0 +1,23 @@
+{
+  "minimum_free_space_gb": 25,
+  "require_ac_power": true,
+  "require_internet": true,
+  "windows_update_max_cycles": 5,
+  "computer_name_mode": "prompt",
+  "computer_name_prefix": "NB",
+  "create_local_admin": true,
+  "local_admin_username": "LocalAdmin",
+  "local_admin_password_mode": "prompt",
+  "allow_random_password_export": false,
+  "install_winget_apps": true,
+  "install_local_apps": true,
+  "install_offline_drivers": true,
+  "stop_before_domain_join": true,
+  "fail_on_missing_required_app": true,
+  "fail_on_windows_home": true,
+  "allow_continue_without_ac": false,
+  "allow_continue_with_pending_reboot": false,
+  "pswindowsupdate_bootstrap": true,
+  "winget_bootstrap": false,
+  "windows_update_include_microsoft_update": true
+}

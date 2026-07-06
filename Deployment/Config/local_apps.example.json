@@ -1,0 +1,28 @@
+{
+  "apps": [
+    {
+      "name": "Example MSI App",
+      "relative_path": "Example\\installer.msi",
+      "installer_type": "msi",
+      "silent_arguments": "/qn /norestart",
+      "detection": {
+        "type": "registry",
+        "display_name_pattern": "Example App*"
+      },
+      "required": false,
+      "reboot_behavior": "suppress"
+    },
+    {
+      "name": "Example EXE App",
+      "relative_path": "Example\\setup.exe",
+      "installer_type": "exe",
+      "silent_arguments": "/quiet /norestart",
+      "detection": {
+        "type": "command",
+        "command": "Test-Path 'C:\\Program Files\\Example\\example.exe'"
+      },
+      "required": false,
+      "reboot_behavior": "suppress"
+    }
+  ]
+}
