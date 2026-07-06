@@ -250,6 +250,16 @@ Validate a generated USB-root answer file:
 
 For full Microsoft schema validation, install the Windows ADK or pass `-DllPath` pointing to `Microsoft.ComponentStudio.ComponentPlatformInterface.dll`. Without that DLL, the validator still performs XML and toolkit-specific semantic checks.
 
+To let the validator install the ADK packages with winget when the schema DLL is missing:
+
+```powershell
+.\Validate-Unattend.ps1 -InstallAdkWithWinget -RequireSchema
+```
+
+This uses winget IDs `Microsoft.WindowsADK` and `Microsoft.WindowsADK.WinPEAddon`.
+
+The `windowsPE` pass is the Windows Setup phase that runs inside Windows PE before the installed operating system is applied. This toolkit uses it only in generated answer files when `wipe_repartition_drive=true`, because that is where disk wipe, GPT partitioning, and image install target settings must be applied.
+
 ## Driver Folders
 
 Drivers must be stored as:

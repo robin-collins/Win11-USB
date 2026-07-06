@@ -27,6 +27,10 @@
     .PARAMETER RequireSchema
         Fail validation if ADK/AIK schema validation cannot be performed.
 
+    .PARAMETER InstallAdkWithWinget
+        If the schema DLL cannot be found, install Microsoft.WindowsADK and
+        Microsoft.WindowsADK.WinPEAddon with winget, then search for the schema DLL again.
+
     .PARAMETER Generated
         Treat Path as a generated USB-root Autounattend.xml. Generated files should not contain toolkit placeholders.
 
@@ -52,6 +56,7 @@ param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'Deployment\Config\deployment_config.json'),
     [string]$DllPath,
     [switch]$RequireSchema,
+    [switch]$InstallAdkWithWinget,
     [switch]$Generated,
     [switch]$Template
 )
@@ -135,6 +140,84 @@ function Find-UnattendSchemaDll {
     }
 
     return $null
+}
+
+function Get-WingetCommand {
+    $command = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    $candidate = Get-ChildItem -Path "$env:ProgramFiles\WindowsApps" -Filter winget.exe -Recurse -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1
+    if ($candidate) { return $candidate.FullName }
+
+    return $null
+}
+
+function Invoke-ProcessCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int[]]$AllowedExitCodes = @(0)
+    )
+
+    $tempBase = Join-Path $env:TEMP ([guid]::NewGuid().ToString('N'))
+    $stdoutPath = "$tempBase.out"
+    $stderrPath = "$tempBase.err"
+
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+
+    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { '' }
+    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+    $result = [ordered]@{
+        exit_code = $process.ExitCode
+        stdout    = $stdout
+        stderr    = $stderr
+    }
+
+    if ($AllowedExitCodes -notcontains $process.ExitCode) {
+        throw "Command failed with exit code $($process.ExitCode): $FilePath $($Arguments -join ' ')`n$stderr"
+    }
+
+    return $result
+}
+
+function Test-WingetPackageInstalled {
+    param(
+        [Parameter(Mandatory = $true)][string]$WingetPath,
+        [Parameter(Mandatory = $true)][string]$PackageId
+    )
+
+    $result = Invoke-ProcessCapture -FilePath $WingetPath -Arguments @('list', '--id', $PackageId, '--exact', '--accept-source-agreements') -AllowedExitCodes @(0, 1)
+    return ($result.exit_code -eq 0 -and $result.stdout -match [regex]::Escape($PackageId))
+}
+
+function Install-AdkPackagesWithWinget {
+    $winget = Get-WingetCommand
+    if (-not $winget) {
+        throw 'winget.exe was not found. Install App Installer or install Windows ADK manually.'
+    }
+
+    foreach ($packageId in @('Microsoft.WindowsADK', 'Microsoft.WindowsADK.WinPEAddon')) {
+        if (Test-WingetPackageInstalled -WingetPath $winget -PackageId $packageId) {
+            Add-ValidationResult -Status Pass -Check "winget package $packageId" -Message 'Package already appears to be installed.'
+            continue
+        }
+
+        Add-ValidationResult -Status Warn -Check "winget package $packageId" -Message 'Package not detected; installing with winget. This can take several minutes.'
+        Invoke-ProcessCapture -FilePath $winget -Arguments @(
+            'install',
+            '--id', $packageId,
+            '--exact',
+            '--accept-package-agreements',
+            '--accept-source-agreements',
+            '--disable-interactivity'
+        ) -AllowedExitCodes @(0, 3010) | Out-Null
+        Add-ValidationResult -Status Pass -Check "winget package $packageId" -Message 'winget install completed.'
+    }
 }
 
 function Test-XmlSchema {
@@ -321,6 +404,14 @@ try {
     }
 
     if (-not $DllPath) { $DllPath = Find-UnattendSchemaDll }
+    if (-not $DllPath -and $InstallAdkWithWinget) {
+        try {
+            Install-AdkPackagesWithWinget
+            $DllPath = Find-UnattendSchemaDll
+        } catch {
+            Add-ValidationResult -Status Fail -Check 'ADK winget install' -Message $_.Exception.Message
+        }
+    }
     if ($DllPath -and (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
         try {
             $schemaText = Get-Schema -Path (Resolve-Path -LiteralPath $DllPath).Path
