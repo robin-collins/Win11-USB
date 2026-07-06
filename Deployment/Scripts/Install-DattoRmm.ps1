@@ -66,6 +66,27 @@ $downloadUrl = "https://syrah.rmm.datto.com/download-agent/windows/$siteId"
 $installerPath = Join-Path $env:TEMP ("DattoRmm-AgentInstall-{0}.exe" -f $siteId)
 $downloadLog = if ($script:DeploymentLogContext) { Join-Path $script:DeploymentLogContext.LogDir 'datto-rmm-download.log' } else { Join-Path $env:TEMP 'datto-rmm-download.log' }
 
+if (Test-DeploymentDryRun) {
+    # UUID validation and the already-installed detection above both ran for real (the
+    # genuine value of a dry run here); no download, signature check, or install happens below.
+    $installArgumentLine = ConvertTo-ProcessArgumentString -Arguments (Split-CommandLineArguments -ArgumentString ([string]$config.datto_rmm_install_arguments))
+    Write-DryRunAction -State $state -Step 'DattoRmm' -Action "would download agent from $downloadUrl and run: <installer> $installArgumentLine" -Data ([ordered]@{
+            site_id_uuid = $siteId
+            download_url = $downloadUrl
+            install_arguments = $config.datto_rmm_install_arguments
+        })
+    if ($state) {
+        $state.datto_rmm = [ordered]@{
+            site_id_uuid = $siteId
+            status       = 'DryRun'
+            timestamp    = (Get-Date).ToString('o')
+        }
+        Write-DeploymentState -State $state -StatePath $StatePath
+    }
+    Write-Log -Level Success -Message "Dry run: Datto RMM agent would be downloaded from $downloadUrl and installed for site $siteId."
+    return
+}
+
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
     Write-Log -Level Info -Message "Downloading Datto RMM agent for site $siteId."

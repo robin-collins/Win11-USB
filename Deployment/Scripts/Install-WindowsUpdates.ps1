@@ -80,6 +80,59 @@ function Invoke-PSWindowsUpdateCycle {
     }
 }
 
+function Invoke-PSWindowsUpdateScan {
+    <#
+        Dry-run counterpart to Invoke-PSWindowsUpdateCycle: performs the same real scan (the
+        genuine value of a dry run here) but never calls Install-WindowsUpdate. Enabling the
+        Microsoft Update service manager is left running for real even in dry-run: it only
+        registers an additional update source (no reboot, no installed changes) and is
+        necessary for the scan itself to see Microsoft-sourced updates, matching the scan's own
+        accuracy goal rather than being a mutation a technician would consider unsafe.
+    #>
+    param([bool]$IncludeMicrosoftUpdate)
+
+    if ($IncludeMicrosoftUpdate) {
+        try {
+            Add-WUServiceManager -MicrosoftUpdate -Confirm:$false -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Log -Level Warn -Message "Could not enable Microsoft Update service: $($_.Exception.Message)"
+        }
+    }
+
+    $scanArgs = @{
+        AcceptAll = $true
+        IgnoreReboot = $true
+        ErrorAction = 'Stop'
+    }
+    if ($IncludeMicrosoftUpdate) { $scanArgs.MicrosoftUpdate = $true }
+
+    $available = @(Get-WindowsUpdate @scanArgs)
+    [ordered]@{
+        installed_count = 0
+        reboot_required = (Test-PendingReboot)
+        updates = @($available | Select-Object Title, KB, Size)
+    }
+}
+
+function Invoke-ComWindowsUpdateScan {
+    # Dry-run counterpart to Invoke-ComWindowsUpdateCycle: Search() alone is read-only (no
+    # EulaAccepted/Download/Install calls), so this never mutates anything.
+    $session = New-Object -ComObject Microsoft.Update.Session
+    $searcher = $session.CreateUpdateSearcher()
+    $result = $searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
+
+    $titles = @()
+    for ($i = 0; $i -lt $result.Updates.Count; $i++) {
+        $titles += $result.Updates.Item($i).Title
+    }
+
+    [ordered]@{
+        installed_count = 0
+        reboot_required = (Test-PendingReboot)
+        updates = @($titles | ForEach-Object { [ordered]@{ title = $_ } })
+    }
+}
+
 function Invoke-ComWindowsUpdateCycle {
     $session = New-Object -ComObject Microsoft.Update.Session
     $searcher = $session.CreateUpdateSearcher()
@@ -123,6 +176,37 @@ function Invoke-ComWindowsUpdateCycle {
 $maxCycles = [int]$config.windows_update_max_cycles
 if ($maxCycles -lt 1) { $maxCycles = 1 }
 $includeMicrosoftUpdate = [bool]$config.windows_update_include_microsoft_update
+
+if (Test-DeploymentDryRun) {
+    # Dry-run invariant (FABLE_TASKS.md T07b): a single real scan is the whole value of this
+    # step in dry-run -- it is never repeated across windows_update_max_cycles, since nothing
+    # is ever installed to change the outcome of a second scan. Never bootstrap-installs
+    # PSWindowsUpdate here, regardless of pswindowsupdate_bootstrap.
+    if (-not (Test-InternetConnectivity)) {
+        Write-DryRunAction -State $state -Step 'WindowsUpdates' -Action 'skipped: no internet connectivity detected' -Data @{ include_microsoft_update = $includeMicrosoftUpdate }
+        Write-Log -Level Info -Message 'Dry run: no internet connectivity detected; skipping the Windows Update scan.'
+        return
+    }
+
+    $moduleAvailable = [bool](Get-Module -ListAvailable -Name PSWindowsUpdate | Select-Object -First 1)
+    if ($moduleAvailable) {
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        $cycleResult = Invoke-PSWindowsUpdateScan -IncludeMicrosoftUpdate $includeMicrosoftUpdate
+        $scanMethod = 'PSWindowsUpdate'
+    } else {
+        if ([bool]$config.pswindowsupdate_bootstrap) {
+            Write-DryRunAction -State $state -Step 'WindowsUpdates' -Action 'would run: Install-Module PSWindowsUpdate -Scope AllUsers -Force -AllowClobber' -Data @{}
+        }
+        Write-Log -Level Warn -Message 'Dry run: PSWindowsUpdate module unavailable; using the Windows Update COM fallback for the scan (never bootstrap-installs the module in dry-run).'
+        $cycleResult = Invoke-ComWindowsUpdateScan
+        $scanMethod = 'COM'
+    }
+
+    Write-DryRunAction -State $state -Step 'WindowsUpdates' -Action "scan (method=$scanMethod) found $($cycleResult.updates.Count) update(s); would-reboot=$($cycleResult.reboot_required)" -Data $cycleResult
+    Write-Log -Level Success -Message "Dry run: Windows Update scan found $($cycleResult.updates.Count) update(s) (nothing installed). Would reboot afterward: $($cycleResult.reboot_required)."
+    return
+}
+
 $useModule = Initialize-PSWindowsUpdateModule -Bootstrap ([bool]$config.pswindowsupdate_bootstrap)
 
 for ($cycle = ([int]$state.update_cycle + 1); $cycle -le $maxCycles; $cycle++) {

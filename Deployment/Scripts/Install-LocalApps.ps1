@@ -13,6 +13,8 @@ $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
 if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = $paths.StateFile }
 $config = Get-DeploymentConfig -UsbRoot $UsbRoot
 $appConfig = Read-JsonFile -Path $paths.LocalFile -Required
+$state = Read-DeploymentState -StatePath $StatePath
+if (-not $state) { throw "Deployment state not found at $StatePath" }
 
 if (-not $appConfig.ContainsKey('apps')) {
     throw "Local app config must contain a top-level 'apps' array: $($paths.LocalFile)"
@@ -45,6 +47,47 @@ function Test-LocalAppDetected {
         }
         default {
             throw "Unsupported local app detection type '$type'."
+        }
+    }
+}
+
+function Get-LocalInstallerDryRunAction {
+    <#
+        Dry-run counterpart to Invoke-LocalInstaller's argument construction (FABLE_TASKS.md
+        T07b): describes the exact command that would run, without invoking anything. Kept as
+        a separate function rather than adding a "preview" mode to Invoke-LocalInstaller itself,
+        since duplicating a few lines of pure string-building carries far less risk than
+        threading a dry-run branch through a function whose real job is executing installers.
+    #>
+    param(
+        [string]$InstallerPath,
+        [string]$InstallerType,
+        [string]$SilentArguments
+    )
+
+    switch ($InstallerType.ToLowerInvariant()) {
+        'msi' {
+            $installerArgs = @('/i', $InstallerPath)
+            if ([string]::IsNullOrWhiteSpace($SilentArguments)) { $installerArgs += @('/qn', '/norestart') } else { $installerArgs += (Split-CommandLineArguments -ArgumentString $SilentArguments) }
+            return "would run: msiexec.exe $(ConvertTo-ProcessArgumentString -Arguments $installerArgs)"
+        }
+        'exe' {
+            $installerArgs = @()
+            if (-not [string]::IsNullOrWhiteSpace($SilentArguments)) { $installerArgs = Split-CommandLineArguments -ArgumentString $SilentArguments }
+            $argumentLine = ConvertTo-ProcessArgumentString -Arguments $installerArgs
+            if ([string]::IsNullOrEmpty($argumentLine)) { return "would run: $InstallerPath" }
+            return "would run: $InstallerPath $argumentLine"
+        }
+        { $_ -in @('msix', 'appx') } {
+            return "would run: Add-AppxPackage -Path $InstallerPath"
+        }
+        'script' {
+            $installerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $InstallerPath)
+            if (-not [string]::IsNullOrWhiteSpace($SilentArguments)) { $installerArgs += (Split-CommandLineArguments -ArgumentString $SilentArguments) }
+            return "would run: powershell.exe $(ConvertTo-ProcessArgumentString -Arguments $installerArgs)"
+        }
+        default {
+            throw "Unsupported installer_type '$InstallerType' for $InstallerPath."
         }
     }
 }
@@ -112,6 +155,14 @@ foreach ($app in @($appConfig.apps)) {
         continue
     }
 
+    if (Test-DeploymentDryRun) {
+        $action = Get-LocalInstallerDryRunAction -InstallerPath $installerPath -InstallerType $installerType -SilentArguments $silentArguments
+        Write-DryRunAction -State $state -Step 'LocalApps' -Action "$name`: $action" -Data ([ordered]@{ name = $name; installer_path = $installerPath; installer_type = $installerType; required = $required })
+        Write-Log -Level Success -Message "Dry run: $name would be installed ($action)."
+        $results += ,([ordered]@{ name = $name; status = 'DryRun'; required = $required; path = $installerPath })
+        continue
+    }
+
     try {
         Write-Log -Level Info -Message "Installing local app $name from $installerPath."
         $install = Invoke-LocalInstaller -InstallerPath $installerPath -InstallerType $installerType -SilentArguments $silentArguments -LogName $logName
@@ -124,6 +175,10 @@ foreach ($app in @($appConfig.apps)) {
         $results += ,([ordered]@{ name = $name; status = 'Failed'; required = $required; error = $_.Exception.Message; path = $installerPath })
         if ($required -and [bool]$config.fail_on_missing_required_app) { throw $message }
     }
+}
+
+if (Test-DeploymentDryRun) {
+    Write-DeploymentState -State $state -StatePath $StatePath
 }
 
 Write-StructuredLog -Level Info -Message 'Local app installation completed' -Data $results
