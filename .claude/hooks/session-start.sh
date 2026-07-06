@@ -32,8 +32,12 @@ if ! pwsh -NoLogo -NoProfile -Command "if (-not (Get-Module -ListAvailable -Name
   echo "Installing PSScriptAnalyzer from the PowerShell Gallery..."
   pwsh -NoLogo -NoProfile -Command "
     Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
-    Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop && Import-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+    Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop && Import-Module -Name PSScriptAnalyzer -Scope Local -Force -ErrorAction Stop && Write-Host (Get-Module -ListAvailable -Name 'PSScriptAnalyzer' | Select-Object -First 1).Version.ToString(3);
   " || echo "WARNING: could not install PSScriptAnalyzer (PowerShell Gallery is unreachable from this environment's network policy)." >&2
+else
+  PSScriptAnalyzerVersion=$(pwsh -NoLogo -NoProfile -Command "
+  (Get-Module -ListAvailable -Name 'PSScriptAnalyzer' | Select-Object -First 1).Version.ToString(3)");
+  echo "PSScriptAnalyzer already Installed and version $PSScriptAnalyzerVersion";
 fi
 
 # Pester ships from the PowerShell Gallery, which this sandbox's
@@ -43,6 +47,10 @@ if ! pwsh -NoLogo -NoProfile -Command "if (-not (Get-Module -ListAvailable -Name
   echo "Installing Pester from the PowerShell Gallery..."
   pwsh -NoLogo -NoProfile -Command "
     Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
-    Install-Module -Name Pester -Scope CurrentUser -Force -ErrorAction Stop && Import-Module -Name Pester -Scope CurrentUser -Force -ErrorAction Stop
+    Install-Module -Name Pester -Scope CurrentUser -Force -ErrorAction Stop && Import-Module -Name Pester -Scope Local -Force -ErrorAction Stop && Write-Host (Get-Module -ListAvailable -Name 'Pester' | Select-Object -First 1).Version.ToString(3);
   " || echo "WARNING: could not install Pester (PowerShell Gallery is unreachable from this environment's network policy)." >&2
+else
+  PesterVersion=$(pwsh -NoLogo -NoProfile -Command "
+  (Get-Module -ListAvailable -Name 'Pester' | Select-Object -First 1).Version.ToString(3)");
+  echo "Pester already Installed and version $PesterVersion";
 fi
