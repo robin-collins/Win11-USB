@@ -113,7 +113,13 @@ function Write-DesktopItem {
     $destination = Join-Path $DesktopPath $fileName
     $source = Resolve-DesktopItemSource -Item $Item -UsbRoot $UsbRoot
     if (-not [string]::IsNullOrWhiteSpace($source)) {
+        # Source-exists validation stays real even in dry-run (FABLE_TASKS.md T07c): a missing
+        # configured source is a genuine config defect, not a machine-state mutation to skip.
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Configured desktop source item missing: $source" }
+        if (Test-DeploymentDryRun) {
+            Write-DryRunAction -State $state -Step 'DesktopItems' -Action "would copy '$source' to '$destination'" -Data ([ordered]@{ name = $fileName; source = $source; destination = $destination })
+            return [ordered]@{ name = $fileName; action = 'DryRun-WouldCopy'; path = $destination; source = $source }
+        }
         Copy-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
         return [ordered]@{ name = $fileName; action = 'Copied'; path = $destination; source = $source }
     }
@@ -124,6 +130,10 @@ function Write-DesktopItem {
         if ([string]::IsNullOrWhiteSpace($url)) {
             return [ordered]@{ name = $fileName; action = 'ApprovedOnly'; path = $destination }
         }
+        if (Test-DeploymentDryRun) {
+            Write-DryRunAction -State $state -Step 'DesktopItems' -Action "would create URL shortcut '$destination' -> $url" -Data ([ordered]@{ name = $fileName; destination = $destination; url = $url })
+            return [ordered]@{ name = $fileName; action = 'DryRun-WouldCreateUrl'; path = $destination; url = $url }
+        }
         Set-Content -LiteralPath $destination -Value @('[InternetShortcut]', "URL=$url") -Encoding ASCII -Force -ErrorAction Stop
         return [ordered]@{ name = $fileName; action = 'CreatedUrl'; path = $destination; url = $url }
     }
@@ -131,6 +141,11 @@ function Write-DesktopItem {
     $target = [string](Get-ConfigValue -Hash $Item -Key 'target_path' -Default '')
     if ([string]::IsNullOrWhiteSpace($target)) {
         return [ordered]@{ name = $fileName; action = 'ApprovedOnly'; path = $destination }
+    }
+
+    if (Test-DeploymentDryRun) {
+        Write-DryRunAction -State $state -Step 'DesktopItems' -Action "would create shortcut '$destination' -> $target" -Data ([ordered]@{ name = $fileName; destination = $destination; target = $target })
+        return [ordered]@{ name = $fileName; action = 'DryRun-WouldCreateShortcut'; path = $destination; target = $target }
     }
 
     $shell = New-Object -ComObject WScript.Shell
@@ -169,7 +184,11 @@ function Sync-DesktopItems {
                 if ($file.Name -like [string]$pattern) { $preserved = $true; break }
             }
             if ($approvedNames -contains $file.Name -or $preserved) { continue }
-            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+            if (Test-DeploymentDryRun) {
+                Write-DryRunAction -State $state -Step 'DesktopItems' -Action "would remove unapproved shortcut '$($file.FullName)'" -Data ([ordered]@{ path = $file.FullName; desktop_path = $DesktopPath })
+            } else {
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+            }
             $removed += ,$file.Name
         }
     }

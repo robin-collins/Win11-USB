@@ -29,6 +29,7 @@ $report = [ordered]@{
     report_created_at = (Get-Date).ToString('o')
     status = if ($Failure) { 'Failed' } else { 'Ready for customer onboarding' }
     failure_message = $FailureMessage
+    dry_run = [bool](Test-DeploymentDryRun)
     deployment_state = $state
     asset_inventory = $inventory
     stop_point = 'Domain join, Entra join, and customer-specific identity onboarding were intentionally not performed.'
@@ -46,6 +47,7 @@ $lines = @(
     "Status: $($report.status)",
     "Report created: $($report.report_created_at)",
     "Run ID: $runId",
+    "Dry run: $($report.dry_run)",
     '',
     '## Device',
     "Computer name: $($computer.computer_name)",

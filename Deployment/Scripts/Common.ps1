@@ -1459,12 +1459,19 @@ function Get-OsitSmtpPassword {
 
 function Get-DeploymentReportRoot {
     [CmdletBinding()]
+    [OutputType([string])]
     param([Parameter(Mandatory = $true)][string]$UsbRoot)
 
     $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
     $identity = Get-DeviceIdentity
     $safeDevice = Get-DeviceFolderName -Identity $identity
-    $reportRoot = Join-Path $paths.Reports $safeDevice
+    # State isolation invariant (FABLE_TASKS.md T07c): a dry run must never write into a real
+    # deployment's report folder. Get-DeploymentReportRoot has no run-id parameter (many
+    # call sites already pass just -UsbRoot), so unlike the per-run dryrun-<runid> log folder,
+    # this uses a single shared "dryrun" subfolder under the device's report root -- sufficient
+    # to keep every dry run's asset inventory/report/summary out of the real Reports tree
+    # without changing this function's signature.
+    $reportRoot = if (Test-DeploymentDryRun) { Join-Path (Join-Path $paths.Reports $safeDevice) 'dryrun' } else { Join-Path $paths.Reports $safeDevice }
     New-Item -ItemType Directory -Path $reportRoot -Force -ErrorAction Stop | Out-Null
     return $reportRoot
 }
