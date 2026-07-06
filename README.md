@@ -4,6 +4,47 @@ This repository extends an existing Microsoft Windows 11 installation USB labell
 
 It is designed for technician-led notebook deployment. It automates Windows setup handoff, preflight checks, Windows Update, model driver installation, app installation, asset capture, durable state, logging, and final reporting. It intentionally stops before domain join, Entra join, Autopilot registration, Intune enrollment, or any customer-specific identity work.
 
+## What The Technician Sees
+
+The technician boots from the USB, completes the normal Windows disk/install choices, then signs in with the temporary deployment admin created by `Autounattend.xml`. The deployment console opens, checks prerequisites first, prompts only where a decision is needed, writes progress after every successful step, and stops with a report saying the device is ready for final customer onboarding.
+
+```mermaid
+flowchart TD
+  A["Boot from USB labelled 1S-WIN11"] --> B["Windows setup runs with Autounattend.xml"]
+  B --> C["Technician completes disk and install choices"]
+  C --> D["OOBE network and account blocks are bypassed"]
+  D --> E["DeployAdmin logs on once"]
+  E --> F["Start-Deployment.ps1 opens from the USB"]
+  F --> G["Preflight checks"]
+  G --> H["Computer name and local admin prompts if configured"]
+  H --> I["Windows Updates"]
+  I --> J["Model driver check"]
+  J --> K["winget and local apps"]
+  K --> L["Asset inventory and final reports"]
+  L --> M["Ready for domain join or Entra join"]
+```
+
+```mermaid
+flowchart TD
+  A["Step starts"] --> B{"Step succeeds?"}
+  B -->|"Yes"| C["Write deployment_state.json"]
+  C --> D{"Reboot needed?"}
+  D -->|"No"| E["Continue next step"]
+  D -->|"Yes"| F["Register resume scheduled task"]
+  F --> G["Reboot"]
+  G --> H["Resume after logon from next incomplete step"]
+  B -->|"No"| I["Write failure state and report"]
+  I --> J["Stop immediately for technician review"]
+```
+
+Expect these interaction points:
+
+- Preflight failures stop before real work starts, so missing internet, wrong Windows edition, no AC power, missing config, or USB write problems are caught early.
+- Reboots during rename or Windows Update are normal. The scheduled task resumes the same deployment on next logon.
+- If a model driver folder is missing, the script creates the exact folder and lets the technician copy drivers and recheck, or continue without extra offline drivers.
+- App installers only run when configured. Required app failures stop the run; optional app failures are logged.
+- The final screen and report confirm that customer identity onboarding has not been performed.
+
 ## USB Layout
 
 Copy this project to the root of the Windows 11 USB so the USB contains:
