@@ -1,12 +1,10 @@
 {
   "packages": [
     { "id": "7zip.7zip", "display_name": "7-Zip", "required": true, "install_arguments": "" },
+    { "id": "Microsoft.Office", "display_name": "Microsoft Office", "required": true, "install_arguments": "" },
+    { "id": "TeamViewer.TeamViewer.QuickSupport", "display_name": "TeamViewer Quick Support", "required": true, "install_arguments": "" },
     { "id": "Google.Chrome", "display_name": "Google Chrome", "required": true, "install_arguments": "" },
-    { "id": "Mozilla.Firefox", "display_name": "Mozilla Firefox", "required": false, "install_arguments": "" },
-    { "id": "Notepad++.Notepad++", "display_name": "Notepad++", "required": true, "install_arguments": "" },
-    { "id": "VideoLAN.VLC", "display_name": "VLC media player", "required": false, "install_arguments": "" },
     { "id": "Adobe.Acrobat.Reader.64-bit", "display_name": "Adobe Acrobat Reader", "required": true, "install_arguments": "" },
-    { "id": "Microsoft.PowerShell", "display_name": "PowerShell 7", "required": false, "install_arguments": "" },
-    { "id": "Microsoft.Sysinternals", "display_name": "Sysinternals Suite", "required": false, "install_arguments": "" }
+    { "id": "Microsoft.PowerShell", "display_name": "PowerShell 7", "required": false, "install_arguments": "" }
   ]
 }

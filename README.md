@@ -6,22 +6,26 @@ It is designed for technician-led notebook deployment. It automates Windows setu
 
 ## What The Technician Sees
 
-The technician boots from the USB, completes the normal Windows disk/install choices, then signs in with the OSIT local admin created by `Autounattend.xml`. The deployment console opens, checks prerequisites first, prompts only where a decision is needed, writes progress after every successful step, and stops with a report saying the device is ready for final customer onboarding.
+The technician boots from the USB, completes the normal Windows install choices unless automatic repartitioning is enabled, then signs in with the OSIT local admin created by `Autounattend.xml`. The deployment console opens, checks prerequisites first, prompts only where a decision is needed, writes progress after every successful step, and stops with a report saying the device is ready for final customer onboarding.
 
 ```mermaid
 flowchart TD
   A["Boot from USB labelled 1S-WIN11"] --> B["Windows setup runs with Autounattend.xml"]
-  B --> C["Technician completes disk and install choices"]
-  C --> D["OOBE network and account blocks are bypassed"]
-  D --> E["OSIT logs on once"]
-  E --> F["Start-Deployment.ps1 opens from the USB"]
-  F --> G["Preflight checks"]
-  G --> H["Computer name and local admin prompts if configured"]
-  H --> I["Windows Updates"]
-  I --> J["Model driver check"]
-  J --> K["winget and local apps"]
-  K --> L["Asset inventory and final reports"]
-  L --> M["Ready for domain join or Entra join"]
+  B --> C{"wipe_repartition_drive enabled?"}
+  C -->|"No"| D["Technician completes disk and install choices"]
+  C -->|"Yes"| E["Disk 0 is wiped and partitioned automatically"]
+  D --> F["OOBE network and account blocks are bypassed"]
+  E --> F
+  F --> G["OSIT logs on once"]
+  G --> H["Start-Deployment.ps1 opens from the USB"]
+  H --> I["Preflight checks"]
+  I --> J["Computer name and local admin prompts if configured"]
+  J --> K["Windows Updates"]
+  K --> L["Model driver check"]
+  L --> M["winget and local apps"]
+  M --> N["Final desktop cleanup"]
+  N --> O["Asset inventory and final reports"]
+  O --> P["Ready for domain join or Entra join"]
 ```
 
 ```mermaid
@@ -97,13 +101,20 @@ Matching `.example.json` files are included as templates.
 
 Important `deployment_config.json` options:
 
+- `wipe_repartition_drive`: when `true`, the generated USB `Autounattend.xml` wipes the configured disk and creates the standard OSIT UEFI/GPT layout before installing Windows. Default is `false`.
+- `wipe_repartition_disk_id`: disk number to wipe. Default is `0`.
+- `efi_partition_size_mb`, `msr_partition_size_mb`, `recovery_partition_size_mb`: default to `512`, `16`, and `2048`.
+- `windows_image_name`: image name to install from the USB. Default is `Windows 11 Pro`.
 - `require_ac_power`: fail preflight on battery power for notebooks.
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
 - `osit_local_admin_username`: defaults to `OSIT`. This is the always-present primary local admin.
 - `primary_setup_username`: defaults to `OSIT`.
+- `final_resultant_user`: user profile whose Desktop should represent the final technician-ready desktop. Defaults to `OSIT`.
 - `additional_local_users`: creates optional extra local accounts. Each entry supports `username`, `full_name`, `description`, `groups`, `password_mode`, `password_never_expires`, `enabled`, and `primary_setup_user`.
+- `configure_desktop_items`: runs final desktop cleanup after app installation.
+- `desktop_items`: controls Public Desktop and final user Desktop desired state.
 - `install_winget_apps`, `install_local_apps`, `install_offline_drivers`: enable or skip those phases.
 - `stop_before_domain_join`: documents the intended stopping point. The scripts do not perform customer identity joins.
 
@@ -134,6 +145,30 @@ Example additional local account config:
 ]
 ```
 
+Example desktop config:
+
+```json
+"final_resultant_user": "OSIT",
+"configure_desktop_items": true,
+"desktop_items": {
+  "manage_common_desktop": true,
+  "manage_final_user_desktop": true,
+  "remove_unapproved_shortcuts": true,
+  "preserve_patterns": [ "desktop.ini" ],
+  "common_desktop_items": [],
+  "final_user_desktop_items": [
+    {
+      "name": "Company Portal",
+      "type": "url",
+      "url": "https://portal.manage.microsoft.com",
+      "enabled": false
+    }
+  ]
+}
+```
+
+With `remove_unapproved_shortcuts=true` and an empty `common_desktop_items` list, winget/MSI shortcuts dropped onto the Public Desktop are removed. Add approved entries to keep or create only the shortcuts you want.
+
 ## Security Notes
 
 `Autounattend.xml` creates the OSIT local administrator account and auto-logs it on once to start the deployment console.
@@ -153,15 +188,28 @@ If an additional account `password_mode` is set to `random`, the toolkit only ge
 
 Place `Autounattend.xml` at the USB root.
 
-The provided file:
+The repository `Autounattend.xml` is a template. `Initialize-UsbDeployment.ps1` writes the real USB-root file after injecting the OSIT password and, if configured, the disk partitioning block.
 
-- does not partition or wipe disks.
+By default, `wipe_repartition_drive` is `false`, so disk selection, deletion, partitioning, and image selection remain technician-led.
+
+When `wipe_repartition_drive` is `true`, the generated USB answer file wipes `wipe_repartition_disk_id` and creates this GPT/UEFI layout:
+
+| Partition | Filesystem | Size | Notes |
+| --- | --- | ---: | --- |
+| EFI System (ESP) | FAT32 | 512 MB | Larger than Microsoft's minimum. |
+| MSR | None | 16 MB | Microsoft's standard. |
+| Windows (C:) | NTFS | Remaining space minus WinRE | Main OS partition. |
+| Windows Recovery (WinRE) | NTFS | 2 GB | Room for future WinRE updates and recovery tools. |
+
+The generated file:
+
+- can wipe and repartition the configured disk when `wipe_repartition_drive` is `true`.
 - sets OOBE options to avoid Microsoft account and network blocking prompts.
 - writes the Windows 11 `BypassNRO` registry value during setup instead of requiring `Shift+F10` and `oobe\BypassNRO.cmd`.
 - creates the `OSIT` local administrator.
 - auto-logs on once and starts `Deployment\Scripts\Start-Deployment.ps1` from the USB found by label.
 
-Disk selection, deletion, partitioning, and image selection remain technician-led. If you want destructive disk partitioning, keep it in a separate answer file and treat it as a deliberate site-specific change.
+Treat `wipe_repartition_drive=true` as destructive. It is intended for standardised deployments where disk 0 is the target OS disk.
 
 ## Driver Folders
 
@@ -287,7 +335,7 @@ To force a new run:
 5. Add model drivers under `Deployment\Drivers\<Manufacturer>\<Model>` when available.
 6. Add configured local installers under `Deployment\Apps\Local`.
 7. Boot the target notebook from the USB.
-8. Install Windows 11 Pro using the technician-led setup flow.
+8. Install Windows 11 Pro using the technician-led setup flow, or let `wipe_repartition_drive=true` wipe and target disk 0 automatically.
 9. Let `Autounattend.xml` bypass OOBE network/account blocking and launch the deployment script.
 10. Follow prompts for computer name, local admin password, and any missing driver folder decision.
 11. Review the final report.

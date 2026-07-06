@@ -19,6 +19,7 @@ function Get-DeploymentSteps {
         'ModelDrivers',
         'WingetApps',
         'LocalApps',
+        'DesktopItems',
         'FinalReport',
         'Complete'
     )
@@ -334,6 +335,10 @@ function Invoke-DeploymentStep {
         'LocalApps' {
             if ([bool]$Config.install_local_apps) { & (Join-Path $PSScriptRoot 'Install-LocalApps.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
             else { Write-Log -Level Info -Message 'Local app installation is disabled by config.' }
+        }
+        'DesktopItems' {
+            if ([bool]$Config.configure_desktop_items) { & (Join-Path $PSScriptRoot 'Configure-DesktopItems.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
+            else { Write-Log -Level Info -Message 'Desktop item configuration is disabled by config.' }
         }
         'FinalReport' { & (Join-Path $PSScriptRoot 'Write-DeploymentReport.ps1') -UsbRoot $UsbRoot -StatePath $StatePath | Out-Null }
         'Complete' {

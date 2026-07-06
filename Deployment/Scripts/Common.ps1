@@ -155,16 +155,32 @@ function Write-JsonFile {
 function Get-DefaultDeploymentConfig {
     @{
         minimum_free_space_gb            = 25
+        wipe_repartition_drive           = $false
+        wipe_repartition_disk_id         = 0
+        efi_partition_size_mb            = 512
+        msr_partition_size_mb            = 16
+        recovery_partition_size_mb       = 2048
+        windows_image_name               = 'Windows 11 Pro'
         require_ac_power                 = $true
         require_internet                 = $true
         windows_update_max_cycles        = 5
         computer_name_mode               = 'prompt'
         computer_name_prefix             = 'NB'
         primary_setup_username           = 'OSIT'
+        final_resultant_user             = 'OSIT'
         osit_local_admin_username        = 'OSIT'
         osit_local_admin_full_name       = 'OSIT Local Administrator'
         osit_local_admin_description     = 'Primary OSIT local administrator account'
         additional_local_users           = @()
+        configure_desktop_items          = $true
+        desktop_items                    = @{
+            manage_common_desktop = $true
+            manage_final_user_desktop = $true
+            remove_unapproved_shortcuts = $true
+            preserve_patterns = @('desktop.ini')
+            common_desktop_items = @()
+            final_user_desktop_items = @()
+        }
         allow_random_password_export     = $false
         install_winget_apps              = $true
         install_local_apps               = $true

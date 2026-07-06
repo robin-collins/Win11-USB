@@ -77,11 +77,106 @@ function Resolve-OsitPasswordForInitialisation {
     return $plain
 }
 
+function ConvertTo-XmlText {
+    param([AllowEmptyString()][string]$Value)
+    return [System.Security.SecurityElement]::Escape($Value)
+}
+
+function New-WindowsPeSettingsBlock {
+    param([hashtable]$Config)
+
+    if (-not [bool]$Config.wipe_repartition_drive) {
+        return ''
+    }
+
+    $diskId = [int]$Config.wipe_repartition_disk_id
+    if ($diskId -lt 0) { throw 'wipe_repartition_disk_id must be 0 or greater.' }
+
+    $efiSize = [int]$Config.efi_partition_size_mb
+    $msrSize = [int]$Config.msr_partition_size_mb
+    $recoverySize = [int]$Config.recovery_partition_size_mb
+    $imageName = [string]$Config.windows_image_name
+
+    if ($efiSize -lt 100) { throw 'efi_partition_size_mb must be at least 100.' }
+    if ($msrSize -ne 16) { Write-Warning 'Microsoft standard MSR size is 16 MB. Continuing with configured value.' }
+    if ($recoverySize -lt 1024) { throw 'recovery_partition_size_mb must be at least 1024.' }
+    if ([string]::IsNullOrWhiteSpace($imageName)) { throw 'windows_image_name must not be empty when wipe_repartition_drive is true.' }
+
+    Write-Host ''
+    Write-Host "Destructive partitioning is ENABLED for disk $diskId." -ForegroundColor Yellow
+    Write-Host "Generated Autounattend.xml will clean disk $diskId and create EFI $efiSize MB, MSR $msrSize MB, Windows, and WinRE $recoverySize MB partitions." -ForegroundColor Yellow
+
+    $diskPartCommand = @(
+        "select disk $diskId",
+        'clean',
+        'convert gpt',
+        "create partition efi size=$efiSize",
+        'format quick fs=fat32 label="System"',
+        'assign letter="S"',
+        "create partition msr size=$msrSize",
+        'create partition primary',
+        "shrink desired=$recoverySize minimum=$recoverySize",
+        'format quick fs=ntfs label="Windows"',
+        'assign letter="C"',
+        'create partition primary',
+        'format quick fs=ntfs label="Windows RE tools"',
+        'set id="de94bba4-06d1-4d40-a16a-bfd50179d6ac"',
+        'gpt attributes=0x8000000000000001',
+        'list volume'
+    )
+
+    $echoLines = ($diskPartCommand | ForEach-Object { 'echo ' + $_ }) -join '&'
+    $commandLine = 'cmd.exe /c "({0}) > X:\OSIT-DiskPart.txt & diskpart /s X:\OSIT-DiskPart.txt"' -f $echoLines
+    $escapedImageName = ConvertTo-XmlText -Value $imageName
+
+    return @"
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <SetupUILanguage>
+        <UILanguage>en-US</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>en-AU</InputLocale>
+      <SystemLocale>en-AU</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-AU</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>1</Order>
+          <Description>Wipe disk $diskId and create OSIT Windows 11 UEFI partition layout</Description>
+          <Path><![CDATA[$commandLine]]></Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+              <Key>/IMAGE/NAME</Key>
+              <Value>$escapedImageName</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo>
+            <DiskID>$diskId</DiskID>
+            <PartitionID>3</PartitionID>
+          </InstallTo>
+          <InstallToAvailablePartition>false</InstallToAvailablePartition>
+        </OSImage>
+      </ImageInstall>
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+      </UserData>
+    </component>
+  </settings>
+"@
+}
+
 function Write-PreparedAutounattend {
     param(
         [string]$SourcePath,
         [string]$TargetPath,
-        [string]$Password
+        [string]$Password,
+        [hashtable]$Config
     )
 
     $content = Get-Content -LiteralPath $SourcePath -Raw -ErrorAction Stop
@@ -91,6 +186,7 @@ function Write-PreparedAutounattend {
 
     $escapedPassword = [System.Security.SecurityElement]::Escape($Password)
     $content = $content.Replace('__OSIT_LOCAL_ADMIN_PASSWORD__', $escapedPassword)
+    $content = $content.Replace('  __WINDOWS_PE_SETTINGS__', (New-WindowsPeSettingsBlock -Config $Config).TrimEnd())
     Set-Content -LiteralPath $TargetPath -Value $content -Encoding UTF8 -Force -ErrorAction Stop
 
     $xmlValidation = [xml]$content
@@ -103,6 +199,7 @@ if ([string]::IsNullOrWhiteSpace($UsbRoot)) {
 
 $paths = Initialize-DeploymentDirectories -UsbRoot $UsbRoot
 Write-Host "Deployment folder structure ensured under $UsbRoot" -ForegroundColor Green
+$deploymentConfig = Get-DeploymentConfig -UsbRoot $sourceRoot
 $ositPassword = Resolve-OsitPasswordForInitialisation -SourceRoot $sourceRoot -UsbRoot $UsbRoot
 
 if (-not $SkipCopy) {
@@ -116,7 +213,7 @@ if (-not $SkipCopy) {
     $sourceAutounattend = Join-Path $sourceRoot 'Autounattend.xml'
     $targetAutounattend = Join-Path $UsbRoot 'Autounattend.xml'
     if (Test-Path -LiteralPath $sourceAutounattend -PathType Leaf) {
-        Write-PreparedAutounattend -SourcePath $sourceAutounattend -TargetPath $targetAutounattend -Password $ositPassword
+        Write-PreparedAutounattend -SourcePath $sourceAutounattend -TargetPath $targetAutounattend -Password $ositPassword -Config $deploymentConfig
         Write-Host "Autounattend.xml prepared for OSIT and written to $targetAutounattend" -ForegroundColor Green
     }
 } else {
