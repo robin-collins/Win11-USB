@@ -15,11 +15,18 @@
         - FirstLogonCommand points back to USB label 1S-WIN11 and Start-Deployment.ps1.
         - Optional destructive disk layout checks when generated XML contains a windowsPE pass.
 
+        In -Ci mode, this script additionally regenerates Autounattend.xml/OSIT-DiskPart.txt into a
+        temp folder using the exact same generation logic Initialize-UsbDeployment.ps1 uses (shared
+        via Deployment\Scripts\UnattendGeneration.ps1) against Deployment\Config\deployment_config.json,
+        then validates that pair too - so CI checks what production would actually write to a USB,
+        not just the repository template.
+
     .PARAMETER Path
         Path to Autounattend.xml. Defaults to .\Autounattend.xml beside this script.
 
     .PARAMETER ConfigPath
-        Path to deployment_config.json. Used for expectation checks such as wipe_repartition_drive.
+        Path to deployment_config.json. Used for expectation checks such as wipe_repartition_drive,
+        and (in -Ci mode) as the config the generated-file check generates from.
 
     .PARAMETER DllPath
         Optional explicit path to Microsoft.ComponentStudio.ComponentPlatformInterface.dll.
@@ -37,11 +44,22 @@
     .PARAMETER Template
         Treat Path as the repository template. Template files should contain toolkit placeholders. This is the default.
 
+    .PARAMETER Ci
+        Run in CI mode: never prompts; treats a missing ADK schema DLL as an expected/normal
+        condition (logged as Skipped rather than Warn) instead of a warning; and additionally
+        generates Autounattend.xml/OSIT-DiskPart.txt from Deployment\Config\deployment_config.json
+        (or -ConfigPath, if given) into a temp folder and validates that generated pair in the same
+        invocation. Exit code contract is unchanged: any Fail-status finding across either check
+        makes the script exit non-zero.
+
     .EXAMPLE
         .\Validate-Unattend.ps1
 
     .EXAMPLE
         .\Validate-Unattend.ps1 -Path E:\Autounattend.xml -Generated
+
+    .EXAMPLE
+        .\Validate-Unattend.ps1 -Ci
 
     .NOTES
         Schema extraction functions are based on:
@@ -58,7 +76,8 @@ param(
     [switch]$RequireSchema,
     [switch]$InstallAdkWithWinget,
     [switch]$Generated,
-    [switch]$Template
+    [switch]$Template,
+    [switch]$Ci
 )
 
 Set-StrictMode -Version 2.0
@@ -73,11 +92,17 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $script
 if (-not $Generated -and -not $Template) { $Template = $true }
 if ($Generated -and $Template) { throw 'Use only one of -Generated or -Template.' }
 
+# Shared with Initialize-UsbDeployment.ps1 so -Ci validates the exact code path that writes a USB,
+# not a re-implementation of it. Dot-sourcing only defines functions/script-scope variables here
+# (no side effects), so it is safe to load unconditionally even when -Ci is not used.
+. (Join-Path $scriptRoot 'Deployment\Scripts\Common.ps1')
+. (Join-Path $scriptRoot 'Deployment\Scripts\UnattendGeneration.ps1')
+
 $script:ValidationResults = New-Object 'System.Collections.Generic.List[object]'
 
 function Add-ValidationResult {
     param(
-        [ValidateSet('Pass', 'Warn', 'Fail')][string]$Status,
+        [ValidateSet('Pass', 'Warn', 'Fail', 'Skipped')][string]$Status,
         [string]$Check,
         [string]$Message,
         [object]$Data = $null
@@ -94,6 +119,7 @@ function Add-ValidationResult {
         'Pass' { 'Green' }
         'Warn' { 'Yellow' }
         'Fail' { 'Red' }
+        'Skipped' { 'Cyan' }
     }
     Write-Host "[$Status] $Check - $Message" -ForegroundColor $color
 }
@@ -211,6 +237,13 @@ function Get-WingetCommand {
     return $null
 }
 
+function Get-ScriptTempPath {
+    # $env:TEMP is a Windows-only convention; [System.IO.Path]::GetTempPath() resolves correctly
+    # on both Windows PowerShell 5.1 and pwsh 7 on Linux/macOS, which keeps this script usable in
+    # CI runners regardless of OS.
+    return [System.IO.Path]::GetTempPath()
+}
+
 function Invoke-ProcessCapture {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -218,7 +251,7 @@ function Invoke-ProcessCapture {
         [int[]]$AllowedExitCodes = @(0)
     )
 
-    $tempBase = Join-Path $env:TEMP ([guid]::NewGuid().ToString('N'))
+    $tempBase = Join-Path (Get-ScriptTempPath) ([guid]::NewGuid().ToString('N'))
     $stdoutPath = "$tempBase.out"
     $stderrPath = "$tempBase.err"
 
@@ -379,213 +412,320 @@ function Test-ExpectedText {
     }
 }
 
-$resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
-$content = Get-Content -LiteralPath $resolvedPath -Raw -ErrorAction Stop
-$isTemplate = [bool]$Template
-$config = Read-JsonHashtable -JsonPath $ConfigPath
+function Invoke-UnattendValidation {
+    <#
+        .SYNOPSIS
+            Runs the full set of Autounattend.xml checks against one file and appends results to
+            $script:ValidationResults. Factored out of top-level script code so -Ci can run it
+            twice in a single invocation: once for the template/-Path check, and once more for the
+            generated Autounattend.xml/OSIT-DiskPart.txt pair written to a temp folder.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ValidationPath,
+        [string]$ValidationConfigPath,
+        [string]$SchemaDllPath,
+        [switch]$RequireAdkSchema,
+        [switch]$InstallAdkSchemaWithWinget,
+        [switch]$IsGenerated,
+        [switch]$IsTemplateSwitch,
+        [switch]$CiMode
+    )
 
-Write-Host "Validating: $resolvedPath"
-Write-Host "Mode: $(if ($isTemplate) { 'Template' } else { 'Generated' })"
+    if (-not $IsGenerated -and -not $IsTemplateSwitch) { $IsTemplateSwitch = $true }
+    if ($IsGenerated -and $IsTemplateSwitch) { throw 'Use only one of -IsGenerated or -IsTemplateSwitch.' }
 
-if ($isTemplate) {
-    if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__') {
-        Add-ValidationResult -Status Pass -Check 'Template password placeholder' -Message 'OSIT password placeholder is present.'
+    $resolvedPath = (Resolve-Path -LiteralPath $ValidationPath -ErrorAction Stop).Path
+    $content = Get-Content -LiteralPath $resolvedPath -Raw -ErrorAction Stop
+    $isTemplate = [bool]$IsTemplateSwitch
+    $config = Read-JsonHashtable -JsonPath $ValidationConfigPath
+
+    Write-Host "Validating: $resolvedPath"
+    Write-Host "Mode: $(if ($isTemplate) { 'Template' } else { 'Generated' })"
+
+    if ($isTemplate) {
+        if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__') {
+            Add-ValidationResult -Status Pass -Check 'Template password placeholder' -Message 'OSIT password placeholder is present.'
+        }
+        else {
+            Add-ValidationResult -Status Fail -Check 'Template password placeholder' -Message 'Template should contain __OSIT_LOCAL_ADMIN_PASSWORD__.'
+        }
+
+        if ($content -match '__WINDOWS_PE_SETTINGS__') {
+            Add-ValidationResult -Status Pass -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is present for config-driven partitioning.'
+        }
+        else {
+            Add-ValidationResult -Status Warn -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is absent; generated partitioning block cannot be inserted by Initialize-UsbDeployment.ps1.'
+        }
     }
     else {
-        Add-ValidationResult -Status Fail -Check 'Template password placeholder' -Message 'Template should contain __OSIT_LOCAL_ADMIN_PASSWORD__.'
+        if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__|__WINDOWS_PE_SETTINGS__') {
+            Add-ValidationResult -Status Fail -Check 'Generated placeholders' -Message 'Generated Autounattend.xml must not contain toolkit placeholders.'
+        }
+        else {
+            Add-ValidationResult -Status Pass -Check 'Generated placeholders' -Message 'No toolkit placeholders found.'
+        }
     }
 
-    if ($content -match '__WINDOWS_PE_SETTINGS__') {
-        Add-ValidationResult -Status Pass -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is present for config-driven partitioning.'
-    }
-    else {
-        Add-ValidationResult -Status Warn -Check 'Template windowsPE placeholder' -Message 'windowsPE placeholder is absent; generated partitioning block cannot be inserted by Initialize-UsbDeployment.ps1.'
-    }
-}
-else {
-    if ($content -match '__OSIT_LOCAL_ADMIN_PASSWORD__|__WINDOWS_PE_SETTINGS__') {
-        Add-ValidationResult -Status Fail -Check 'Generated placeholders' -Message 'Generated Autounattend.xml must not contain toolkit placeholders.'
-    }
-    else {
-        Add-ValidationResult -Status Pass -Check 'Generated placeholders' -Message 'No toolkit placeholders found.'
-    }
-}
+    $validationContent = ConvertTo-ValidationXml -Content $content -IsTemplate:$isTemplate
+    $tempValidationFile = Join-Path (Get-ScriptTempPath) ("autounattend-validation-{0}.xml" -f [guid]::NewGuid().ToString('N'))
+    Set-Content -LiteralPath $tempValidationFile -Value $validationContent -Encoding UTF8 -Force
 
-$validationContent = ConvertTo-ValidationXml -Content $content -IsTemplate:$isTemplate
-$tempValidationFile = Join-Path $env:TEMP ("autounattend-validation-{0}.xml" -f [guid]::NewGuid().ToString('N'))
-Set-Content -LiteralPath $tempValidationFile -Value $validationContent -Encoding UTF8 -Force
-
-try {
     try {
-        [xml]$xml = $validationContent
-        Add-ValidationResult -Status Pass -Check 'XML well-formed' -Message 'XML parsed successfully after template placeholder normalization.'
-    }
-    catch {
-        Add-ValidationResult -Status Fail -Check 'XML well-formed' -Message $_.Exception.Message
-        throw
-    }
+        try {
+            [xml]$xml = $validationContent
+            Add-ValidationResult -Status Pass -Check 'XML well-formed' -Message 'XML parsed successfully after template placeholder normalization.'
+        }
+        catch {
+            Add-ValidationResult -Status Fail -Check 'XML well-formed' -Message $_.Exception.Message
+            throw
+        }
 
-    $ns = Get-UnattendNamespaceManager -Xml $xml
-    $rootName = $xml.DocumentElement.LocalName
-    $rootNs = $xml.DocumentElement.NamespaceURI
-    if ($rootName -eq 'unattend' -and $rootNs -eq 'urn:schemas-microsoft-com:unattend') {
-        Add-ValidationResult -Status Pass -Check 'Root element' -Message 'Root element is unattend with the expected namespace.'
-    }
-    else {
-        Add-ValidationResult -Status Fail -Check 'Root element' -Message "Unexpected root element '$rootName' namespace '$rootNs'."
-    }
-
-    Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'OSIT local account' -XPath '//u:LocalAccount/u:Name' -Expected 'OSIT'
-    Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'OSIT AutoLogon' -XPath '//u:AutoLogon/u:Username' -Expected 'OSIT'
-
-    $localPassword = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:LocalAccount/u:Password/u:Value'
-    $autologonPassword = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:AutoLogon/u:Password/u:Value'
-    if (-not [string]::IsNullOrWhiteSpace($localPassword) -and $localPassword -eq $autologonPassword) {
-        Add-ValidationResult -Status Pass -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values match.'
-    }
-    else {
-        Add-ValidationResult -Status Fail -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values are missing or do not match.'
-    }
-
-    $specializeCommands = @($xml.SelectNodes('//u:settings[@pass="specialize"]//u:RunSynchronousCommand/u:Path', $ns) | ForEach-Object { $_.InnerText })
-    if ($specializeCommands -match 'BypassNRO') {
-        Add-ValidationResult -Status Pass -Check 'BypassNRO' -Message 'BypassNRO registry command is present.'
-    }
-    else {
-        Add-ValidationResult -Status Fail -Check 'BypassNRO' -Message 'BypassNRO registry command was not found in specialize pass.'
-    }
-
-    $firstLogonCommand = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:FirstLogonCommands/u:SynchronousCommand/u:CommandLine'
-    if ($firstLogonCommand -match '1S-WIN11' -and $firstLogonCommand -match 'Start-Deployment\.ps1') {
-        Add-ValidationResult -Status Pass -Check 'FirstLogon deployment command' -Message 'FirstLogon command locates the USB label and starts Start-Deployment.ps1.'
-    }
-    else {
-        Add-ValidationResult -Status Fail -Check 'FirstLogon deployment command' -Message 'FirstLogon command does not contain both USB label 1S-WIN11 and Start-Deployment.ps1.'
-    }
-
-    $windowsPeSettings = @($xml.SelectNodes('//u:settings[@pass="windowsPE"]', $ns))
-    if ($windowsPeSettings.Count -gt 0) {
-        Add-ValidationResult -Status Pass -Check 'windowsPE pass' -Message 'windowsPE pass is present.'
-        $expectedDiskId = [string](Get-ConfigProperty -Config $config -Name 'wipe_repartition_disk_id' -Default 0)
-        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install disk' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:DiskID' -Expected $expectedDiskId
-        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install partition' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:PartitionID' -Expected '3'
-
-        $runSync = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path'
-        if ($runSync -and $runSync.Length -le 259) {
-            Add-ValidationResult -Status Pass -Check 'windowsPE command length' -Message "RunSynchronous command is $($runSync.Length) characters (limit 259)."
+        $ns = Get-UnattendNamespaceManager -Xml $xml
+        $rootName = $xml.DocumentElement.LocalName
+        $rootNs = $xml.DocumentElement.NamespaceURI
+        if ($rootName -eq 'unattend' -and $rootNs -eq 'urn:schemas-microsoft-com:unattend') {
+            Add-ValidationResult -Status Pass -Check 'Root element' -Message 'Root element is unattend with the expected namespace.'
         }
         else {
-            $actualLength = if ($runSync) { $runSync.Length } else { 0 }
-            Add-ValidationResult -Status Fail -Check 'windowsPE command length' -Message "RunSynchronous command is $actualLength characters; the unattend Path limit is 259 and Windows Setup fails with 0x80004005 - 0x40030 when it is exceeded."
+            Add-ValidationResult -Status Fail -Check 'Root element' -Message "Unexpected root element '$rootName' namespace '$rootNs'."
         }
 
-        if ($runSync -match 'OSIT-DiskPart\.txt' -and $runSync -match 'diskpart\s+/s') {
-            Add-ValidationResult -Status Pass -Check 'DiskPart script reference' -Message 'RunSynchronous command locates USB-root OSIT-DiskPart.txt and runs diskpart /s against it.'
+        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'OSIT local account' -XPath '//u:LocalAccount/u:Name' -Expected 'OSIT'
+        Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'OSIT AutoLogon' -XPath '//u:AutoLogon/u:Username' -Expected 'OSIT'
+
+        $localPassword = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:LocalAccount/u:Password/u:Value'
+        $autologonPassword = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:AutoLogon/u:Password/u:Value'
+        if (-not [string]::IsNullOrWhiteSpace($localPassword) -and $localPassword -eq $autologonPassword) {
+            Add-ValidationResult -Status Pass -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values match.'
         }
         else {
-            Add-ValidationResult -Status Fail -Check 'DiskPart script reference' -Message 'RunSynchronous command does not reference USB-root OSIT-DiskPart.txt with diskpart /s.'
+            Add-ValidationResult -Status Fail -Check 'OSIT password consistency' -Message 'Local account and AutoLogon password values are missing or do not match.'
         }
 
-        $diskPartScriptPath = Join-Path (Split-Path -Parent $resolvedPath) 'OSIT-DiskPart.txt'
-        if (Test-Path -LiteralPath $diskPartScriptPath -PathType Leaf) {
-            Add-ValidationResult -Status Pass -Check 'DiskPart script file' -Message "Companion diskpart script found: $diskPartScriptPath"
-            $diskPartContent = Get-Content -LiteralPath $diskPartScriptPath -Raw
+        $specializeCommands = @($xml.SelectNodes('//u:settings[@pass="specialize"]//u:RunSynchronousCommand/u:Path', $ns) | ForEach-Object { $_.InnerText })
+        if ($specializeCommands -match 'BypassNRO') {
+            Add-ValidationResult -Status Pass -Check 'BypassNRO' -Message 'BypassNRO registry command is present.'
+        }
+        else {
+            Add-ValidationResult -Status Fail -Check 'BypassNRO' -Message 'BypassNRO registry command was not found in specialize pass.'
+        }
 
-            $efiSize = [int](Get-ConfigProperty -Config $config -Name 'efi_partition_size_mb' -Default 512)
-            $msrSize = [int](Get-ConfigProperty -Config $config -Name 'msr_partition_size_mb' -Default 16)
-            $recoverySize = [int](Get-ConfigProperty -Config $config -Name 'recovery_partition_size_mb' -Default 2048)
-            foreach ($fragment in @("select disk $expectedDiskId", 'clean', 'convert gpt', "create partition efi size=$efiSize", "create partition msr size=$msrSize", "shrink desired=$recoverySize minimum=$recoverySize", 'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac', 'gpt attributes=0x8000000000000001')) {
-                if ($diskPartContent -match [regex]::Escape($fragment)) {
-                    Add-ValidationResult -Status Pass -Check "Partition command: $fragment" -Message 'Expected partition command fragment found.'
+        $firstLogonCommand = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:FirstLogonCommands/u:SynchronousCommand/u:CommandLine'
+        if ($firstLogonCommand -match '1S-WIN11' -and $firstLogonCommand -match 'Start-Deployment\.ps1') {
+            Add-ValidationResult -Status Pass -Check 'FirstLogon deployment command' -Message 'FirstLogon command locates the USB label and starts Start-Deployment.ps1.'
+        }
+        else {
+            Add-ValidationResult -Status Fail -Check 'FirstLogon deployment command' -Message 'FirstLogon command does not contain both USB label 1S-WIN11 and Start-Deployment.ps1.'
+        }
+
+        $windowsPeSettings = @($xml.SelectNodes('//u:settings[@pass="windowsPE"]', $ns))
+        if ($windowsPeSettings.Count -gt 0) {
+            Add-ValidationResult -Status Pass -Check 'windowsPE pass' -Message 'windowsPE pass is present.'
+            $expectedDiskId = [string](Get-ConfigProperty -Config $config -Name 'wipe_repartition_disk_id' -Default 0)
+            Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install disk' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:DiskID' -Expected $expectedDiskId
+            Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install partition' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:PartitionID' -Expected '3'
+
+            $runSync = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path'
+            if ($runSync -and $runSync.Length -le 259) {
+                Add-ValidationResult -Status Pass -Check 'windowsPE command length' -Message "RunSynchronous command is $($runSync.Length) characters (limit 259)."
+            }
+            else {
+                $actualLength = if ($runSync) { $runSync.Length } else { 0 }
+                Add-ValidationResult -Status Fail -Check 'windowsPE command length' -Message "RunSynchronous command is $actualLength characters; the unattend Path limit is 259 and Windows Setup fails with 0x80004005 - 0x40030 when it is exceeded."
+            }
+
+            if ($runSync -match 'OSIT-DiskPart\.txt' -and $runSync -match 'diskpart\s+/s') {
+                Add-ValidationResult -Status Pass -Check 'DiskPart script reference' -Message 'RunSynchronous command locates USB-root OSIT-DiskPart.txt and runs diskpart /s against it.'
+            }
+            else {
+                Add-ValidationResult -Status Fail -Check 'DiskPart script reference' -Message 'RunSynchronous command does not reference USB-root OSIT-DiskPart.txt with diskpart /s.'
+            }
+
+            $diskPartScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskPartScriptFileName
+            if (Test-Path -LiteralPath $diskPartScriptPath -PathType Leaf) {
+                Add-ValidationResult -Status Pass -Check 'DiskPart script file' -Message "Companion diskpart script found: $diskPartScriptPath"
+                $diskPartContent = Get-Content -LiteralPath $diskPartScriptPath -Raw
+
+                $efiSize = [int](Get-ConfigProperty -Config $config -Name 'efi_partition_size_mb' -Default 512)
+                $msrSize = [int](Get-ConfigProperty -Config $config -Name 'msr_partition_size_mb' -Default 16)
+                $recoverySize = [int](Get-ConfigProperty -Config $config -Name 'recovery_partition_size_mb' -Default 2048)
+                foreach ($fragment in @("select disk $expectedDiskId", 'clean', 'convert gpt', "create partition efi size=$efiSize", "create partition msr size=$msrSize", "shrink desired=$recoverySize minimum=$recoverySize", 'set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac', 'gpt attributes=0x8000000000000001')) {
+                    if ($diskPartContent -match [regex]::Escape($fragment)) {
+                        Add-ValidationResult -Status Pass -Check "Partition command: $fragment" -Message 'Expected partition command fragment found.'
+                    }
+                    else {
+                        Add-ValidationResult -Status Fail -Check "Partition command: $fragment" -Message 'Expected partition command fragment missing from OSIT-DiskPart.txt.'
+                    }
+                }
+
+                if ($diskPartContent -match '(?im)^\s*assign\s+letter=C\b') {
+                    Add-ValidationResult -Status Fail -Check 'DiskPart drive letters' -Message 'Script assigns letter C, which WinPE often gives to the USB stick on a blank disk; a failed assign aborts the rest of the diskpart script.'
                 }
                 else {
-                    Add-ValidationResult -Status Fail -Check "Partition command: $fragment" -Message 'Expected partition command fragment missing from OSIT-DiskPart.txt.'
+                    Add-ValidationResult -Status Pass -Check 'DiskPart drive letters' -Message 'Script avoids assigning drive letter C during WinPE.'
+                }
+
+                if ($diskPartContent -match 'label="' -or $diskPartContent -match 'letter="' -or $diskPartContent -match 'set id="') {
+                    Add-ValidationResult -Status Fail -Check 'Partition command quoting' -Message 'DiskPart script contains quoted label, drive letter, or GUID values that diskpart /s does not require.'
+                }
+                else {
+                    Add-ValidationResult -Status Pass -Check 'Partition command quoting' -Message 'DiskPart script avoids unnecessary quoted values.'
                 }
             }
-
-            if ($diskPartContent -match '(?im)^\s*assign\s+letter=C\b') {
-                Add-ValidationResult -Status Fail -Check 'DiskPart drive letters' -Message 'Script assigns letter C, which WinPE often gives to the USB stick on a blank disk; a failed assign aborts the rest of the diskpart script.'
-            }
             else {
-                Add-ValidationResult -Status Pass -Check 'DiskPart drive letters' -Message 'Script avoids assigning drive letter C during WinPE.'
+                Add-ValidationResult -Status Fail -Check 'DiskPart script file' -Message "windowsPE pass expects $script:DiskPartScriptFileName beside the answer file, but it was not found: $diskPartScriptPath"
             }
-
-            if ($diskPartContent -match 'label="' -or $diskPartContent -match 'letter="' -or $diskPartContent -match 'set id="') {
-                Add-ValidationResult -Status Fail -Check 'Partition command quoting' -Message 'DiskPart script contains quoted label, drive letter, or GUID values that diskpart /s does not require.'
-            }
-            else {
-                Add-ValidationResult -Status Pass -Check 'Partition command quoting' -Message 'DiskPart script avoids unnecessary quoted values.'
-            }
+        }
+        elseif ($config -and $config.wipe_repartition_drive -eq $true -and -not $isTemplate) {
+            Add-ValidationResult -Status Fail -Check 'windowsPE pass' -Message 'Config expects wipe_repartition_drive=true, but generated XML has no windowsPE pass.'
         }
         else {
-            Add-ValidationResult -Status Fail -Check 'DiskPart script file' -Message "windowsPE pass expects OSIT-DiskPart.txt beside the answer file, but it was not found: $diskPartScriptPath"
+            Add-ValidationResult -Status Warn -Check 'windowsPE pass' -Message 'windowsPE pass is absent. This is expected for the repository template or technician-led disk selection.'
         }
-    }
-    elseif ($config -and $config.wipe_repartition_drive -eq $true -and -not $isTemplate) {
-        Add-ValidationResult -Status Fail -Check 'windowsPE pass' -Message 'Config expects wipe_repartition_drive=true, but generated XML has no windowsPE pass.'
-    }
-    else {
-        Add-ValidationResult -Status Warn -Check 'windowsPE pass' -Message 'windowsPE pass is absent. This is expected for the repository template or technician-led disk selection.'
-    }
 
-    $schemaDllCandidates = @()
-    if ($DllPath) {
-        $schemaDllCandidates += $DllPath
-    }
-    else {
-        $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
-    }
-
-    if ($schemaDllCandidates.Count -eq 0 -and $InstallAdkWithWinget) {
-        try {
-            Install-AdkPackagesWithWinget
+        $schemaDllCandidates = @()
+        if ($SchemaDllPath) {
+            $schemaDllCandidates += $SchemaDllPath
+        }
+        else {
             $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
         }
-        catch {
-            Add-ValidationResult -Status Fail -Check 'ADK winget install' -Message $_.Exception.Message
-        }
-    }
 
-    if ($DllPath) {
-        $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
-        $schemaDllCandidates = @($schemaDllCandidates | Select-Object -Unique)
-    }
-
-    if ($schemaDllCandidates.Count -gt 0) {
-        try {
-            $schema = Get-CompatibleUnattendSchema -CandidatePaths $schemaDllCandidates
-            if (-not $schema) { throw 'No compatible ADK schema DLL was found.' }
-
-            $schemaErrors = @(Test-XmlSchema -XmlPath $tempValidationFile -SchemaText $schema.text)
-            if ($schemaErrors.Count -eq 0) {
-                Add-ValidationResult -Status Pass -Check 'ADK schema validation' -Message "Schema validation passed using $($schema.path)."
+        if ($schemaDllCandidates.Count -eq 0 -and $InstallAdkSchemaWithWinget) {
+            try {
+                Install-AdkPackagesWithWinget
+                $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
             }
-            else {
-                foreach ($schemaError in $schemaErrors) {
-                    Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $schemaError
+            catch {
+                Add-ValidationResult -Status Fail -Check 'ADK winget install' -Message $_.Exception.Message
+            }
+        }
+
+        if ($SchemaDllPath) {
+            $schemaDllCandidates += @(Get-UnattendSchemaDllCandidates)
+            $schemaDllCandidates = @($schemaDllCandidates | Select-Object -Unique)
+        }
+
+        if ($schemaDllCandidates.Count -gt 0) {
+            try {
+                $schema = Get-CompatibleUnattendSchema -CandidatePaths $schemaDllCandidates
+                if (-not $schema) { throw 'No compatible ADK schema DLL was found.' }
+
+                $schemaErrors = @(Test-XmlSchema -XmlPath $tempValidationFile -SchemaText $schema.text)
+                if ($schemaErrors.Count -eq 0) {
+                    Add-ValidationResult -Status Pass -Check 'ADK schema validation' -Message "Schema validation passed using $($schema.path)."
+                }
+                else {
+                    foreach ($schemaError in $schemaErrors) {
+                        Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $schemaError
+                    }
                 }
             }
+            catch {
+                Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $_.Exception.Message
+            }
         }
-        catch {
-            Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message $_.Exception.Message
+        elseif ($RequireAdkSchema) {
+            Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message 'Schema DLL was not found and -RequireSchema was specified.'
+        }
+        elseif ($CiMode) {
+            # No ADK/AIK install is expected on a CI runner, so this is a normal, expected
+            # condition rather than something that should show up as a warning wall on every run.
+            Add-ValidationResult -Status Skipped -Check 'ADK schema validation' -Message 'Schema DLL not found; skipped in -Ci mode (no ADK is expected on CI runners). This is expected and not a problem.'
+        }
+        else {
+            Add-ValidationResult -Status Warn -Check 'ADK schema validation' -Message 'Schema DLL not found. Install Windows ADK or pass -DllPath for full schema validation.'
         }
     }
-    elseif ($RequireSchema) {
-        Add-ValidationResult -Status Fail -Check 'ADK schema validation' -Message 'Schema DLL was not found and -RequireSchema was specified.'
-    }
-    else {
-        Add-ValidationResult -Status Warn -Check 'ADK schema validation' -Message 'Schema DLL not found. Install Windows ADK or pass -DllPath for full schema validation.'
+    finally {
+        Remove-Item -LiteralPath $tempValidationFile -Force -ErrorAction SilentlyContinue
     }
 }
-finally {
-    Remove-Item -LiteralPath $tempValidationFile -Force -ErrorAction SilentlyContinue
+
+function New-CiGeneratedUnattendArtifacts {
+    <#
+        .SYNOPSIS
+            For -Ci mode: generates Autounattend.xml/OSIT-DiskPart.txt into a fresh temp folder
+            using the shared UnattendGeneration.ps1 logic and the resolved deployment config, so
+            -Ci validates what Initialize-UsbDeployment.ps1 would actually write to a USB.
+
+        .DESCRIPTION
+            Never prompts: the OSIT password is resolved only from environment variables or a .env
+            file beside this script (Get-OsitLocalAdminPassword), the same non-interactive lookup
+            Initialize-UsbDeployment.ps1 tries first. If no password is available, this throws so
+            the caller can record it as a Fail finding instead of hanging on a prompt.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TemplatePath,
+        [Parameter(Mandatory = $true)][string]$SourceConfigPath,
+        [Parameter(Mandatory = $true)][string]$DestinationDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceConfigPath -PathType Leaf)) {
+        throw "Config file for generated-file validation was not found: $SourceConfigPath"
+    }
+
+    $configOverride = Read-JsonFile -Path $SourceConfigPath -Required
+    $resolvedConfig = Merge-Config -Base (Get-DefaultDeploymentConfig) -Override $configOverride
+
+    $ositPassword = Get-OsitLocalAdminPassword -SearchRoots @($scriptRoot)
+    if ([string]::IsNullOrWhiteSpace($ositPassword)) {
+        throw 'OSIT_LOCAL_ADMIN_PASSWORD was not found in the environment or a .env file beside this script. -Ci never prompts, so set it before running -Ci (a throwaway value is fine for validation).'
+    }
+
+    $generated = New-GeneratedUnattendContent -TemplatePath $TemplatePath -Config $resolvedConfig -Password $ositPassword
+
+    New-Item -ItemType Directory -Path $DestinationDirectory -Force -ErrorAction Stop | Out-Null
+    $generatedAutounattendPath = Join-Path $DestinationDirectory 'Autounattend.xml'
+    Set-Content -LiteralPath $generatedAutounattendPath -Value $generated.AutounattendContent -Encoding UTF8 -Force -ErrorAction Stop
+
+    if ($null -ne $generated.DiskPartScript) {
+        $generatedDiskPartPath = Join-Path $DestinationDirectory $script:DiskPartScriptFileName
+        # ASCII avoids a UTF-8 BOM, which diskpart /s misreads as part of the first command -
+        # matching exactly how Initialize-UsbDeployment.ps1 writes this file.
+        Set-Content -LiteralPath $generatedDiskPartPath -Value $generated.DiskPartScript -Encoding ASCII -Force -ErrorAction Stop
+    }
+
+    return $generatedAutounattendPath
+}
+
+Invoke-UnattendValidation -ValidationPath $Path -ValidationConfigPath $ConfigPath -SchemaDllPath $DllPath `
+    -RequireAdkSchema:$RequireSchema -InstallAdkSchemaWithWinget:$InstallAdkWithWinget `
+    -IsGenerated:$Generated -IsTemplateSwitch:$Template -CiMode:$Ci
+
+if ($Ci) {
+    Write-Host ''
+    Write-Host '-Ci: additionally validating the generated Autounattend.xml/OSIT-DiskPart.txt from Deployment\Config\deployment_config.json...' -ForegroundColor Cyan
+
+    $ciTempDir = Join-Path (Get-ScriptTempPath) ("validate-unattend-ci-{0}" -f [guid]::NewGuid().ToString('N'))
+    try {
+        $sourceAutounattendTemplate = Join-Path $scriptRoot 'Autounattend.xml'
+        try {
+            $generatedAutounattendPath = New-CiGeneratedUnattendArtifacts -TemplatePath $sourceAutounattendTemplate -SourceConfigPath $ConfigPath -DestinationDirectory $ciTempDir
+
+            Invoke-UnattendValidation -ValidationPath $generatedAutounattendPath -ValidationConfigPath $ConfigPath -SchemaDllPath $DllPath `
+                -RequireAdkSchema:$RequireSchema -InstallAdkSchemaWithWinget:$InstallAdkWithWinget `
+                -IsGenerated -CiMode:$Ci
+        }
+        catch {
+            Add-ValidationResult -Status Fail -Check 'Generated Autounattend.xml (Ci)' -Message "Could not generate or validate the CI answer file: $($_.Exception.Message)"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $ciTempDir -PathType Container) {
+            Remove-Item -LiteralPath $ciTempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 $failures = @($script:ValidationResults | Where-Object { $_.status -eq 'Fail' })
 Write-Host ''
-Write-Host ("Validation complete: {0} pass, {1} warning, {2} failure" -f `
+Write-Host ("Validation complete: {0} pass, {1} warning, {2} skipped, {3} failure" -f `
     @($script:ValidationResults | Where-Object { $_.status -eq 'Pass' }).Count, `
     @($script:ValidationResults | Where-Object { $_.status -eq 'Warn' }).Count, `
+    @($script:ValidationResults | Where-Object { $_.status -eq 'Skipped' }).Count, `
         $failures.Count)
 
 if ($failures.Count -gt 0) {
