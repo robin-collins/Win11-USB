@@ -440,7 +440,7 @@ function Invoke-DeploymentStep {
         'FinalReport' { & (Join-Path $PSScriptRoot 'Write-DeploymentReport.ps1') -UsbRoot $UsbRoot -StatePath $StatePath | Out-Null }
         'EmailReport' { & (Join-Path $PSScriptRoot 'Send-DeploymentEmail.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'Complete' {
-            Unregister-DeploymentResumeTask
+            Unregister-DeploymentResumeTask -State $State
             $unattendPaths = @(
                 "$env:windir\Panther\unattend.xml",
                 "$env:windir\Panther\Autounattend.xml",
@@ -448,6 +448,57 @@ function Invoke-DeploymentStep {
                 "$env:windir\Panther\UnattendGC\unattend.xml",
                 "$env:windir\System32\sysprep\unattend.xml"
             )
+            $winlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+
+            if (Test-DeploymentDryRun) {
+                # Credential scrub preview (FABLE_TASKS.md T07c): every path/value/profile this
+                # step would scrub is enumerated and logged as would-scrub or not-present, even
+                # when everything is already clean, so a dry run always produces a non-empty
+                # preview -- this is the audit the FABLE_ENHANCE.md security review called out.
+                foreach ($xmlPath in $unattendPaths) {
+                    if (Test-Path -LiteralPath $xmlPath -PathType Leaf) {
+                        Write-DryRunAction -State $State -Step 'Complete' -Action "would scrub cached unattend file: $xmlPath" -Data @{ path = $xmlPath }
+                    } else {
+                        Write-DryRunAction -State $State -Step 'Complete' -Action "not present: $xmlPath" -Data @{ path = $xmlPath }
+                    }
+                }
+
+                foreach ($valueName in @('DefaultPassword', 'AutoAdminLogon', 'AutoLogonCount')) {
+                    if (Get-ItemProperty -LiteralPath $winlogonKey -Name $valueName -ErrorAction SilentlyContinue) {
+                        Write-DryRunAction -State $State -Step 'Complete' -Action "would scrub Winlogon value: $valueName" -Data @{ key = $winlogonKey; value = $valueName }
+                    } else {
+                        Write-DryRunAction -State $State -Step 'Complete' -Action "not present: Winlogon value $valueName" -Data @{ key = $winlogonKey; value = $valueName }
+                    }
+                }
+
+                # Local handover .env and the MSP WLAN profile are NOT scrubbed by the real
+                # (non-dry-run) Complete block above -- that is the FABLE_ENHANCE.md P0 security
+                # fix, tracked separately and not yet implemented. This preview lists what a
+                # future scrub would need to cover, per FABLE_TASKS.md T07c, without
+                # implementing that fix here.
+                $handoverConfig = ConvertTo-PlainHashtable (Get-ConfigValue -Hash $Config -Key 'local_deployment_handover' -Default @{})
+                $handoverPath = if ($handoverConfig -and $handoverConfig.ContainsKey('local_path') -and -not [string]::IsNullOrWhiteSpace([string]$handoverConfig.local_path)) { [string]$handoverConfig.local_path } else { 'C:\1S-WIN11' }
+                $handoverEnvPath = Join-Path $handoverPath '.env'
+                if (Test-Path -LiteralPath $handoverEnvPath -PathType Leaf) {
+                    Write-DryRunAction -State $State -Step 'Complete' -Action "would scrub local handover .env: $handoverEnvPath (not yet implemented outside dry-run; see FABLE_ENHANCE.md P0)" -Data @{ path = $handoverEnvPath }
+                } else {
+                    Write-DryRunAction -State $State -Step 'Complete' -Action "not present: local handover .env at $handoverEnvPath" -Data @{ path = $handoverEnvPath }
+                }
+
+                $wifiConfig = ConvertTo-PlainHashtable (Get-ConfigValue -Hash $Config -Key 'msp_wifi_setup' -Default @{})
+                $wifiSsid = if ($wifiConfig -and $wifiConfig.ContainsKey('ssid') -and -not [string]::IsNullOrWhiteSpace([string]$wifiConfig.ssid)) { [string]$wifiConfig.ssid } else { 'OneSolution' }
+                $profileCheck = Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'show', 'profile', "name=$wifiSsid") -AllowedExitCodes @(0, 1) -LogName 'complete-dryrun-wlan-profile-check.log' -ReadOnly -State $State
+                if ($profileCheck.exit_code -eq 0) {
+                    Write-DryRunAction -State $State -Step 'Complete' -Action "would scrub MSP WLAN profile: $wifiSsid (not yet implemented outside dry-run; see FABLE_ENHANCE.md P0)" -Data @{ ssid = $wifiSsid }
+                } else {
+                    Write-DryRunAction -State $State -Step 'Complete' -Action "not present: MSP WLAN profile $wifiSsid" -Data @{ ssid = $wifiSsid }
+                }
+
+                Write-Log -Level Success -Message 'Dry run: credential scrub preview complete (see the dry-run summary for the full would-scrub/not-present list). Deployment task sequence would be complete.'
+                Show-DeploymentToast -Title 'Windows 11 Deployment Complete' -Message "$env:COMPUTERNAME would be ready for customer onboarding (dry run)."
+                return
+            }
+
             foreach ($xmlPath in $unattendPaths) {
                 if (Test-Path -LiteralPath $xmlPath -PathType Leaf) {
                     Remove-Item -LiteralPath $xmlPath -Force -ErrorAction SilentlyContinue
@@ -455,7 +506,6 @@ function Invoke-DeploymentStep {
                 }
             }
             # Unattend AutoLogon can leave the OSIT password in plaintext under Winlogon.
-            $winlogonKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
             foreach ($valueName in @('DefaultPassword', 'AutoAdminLogon', 'AutoLogonCount')) {
                 if (Get-ItemProperty -LiteralPath $winlogonKey -Name $valueName -ErrorAction SilentlyContinue) {
                     Remove-ItemProperty -LiteralPath $winlogonKey -Name $valueName -ErrorAction SilentlyContinue

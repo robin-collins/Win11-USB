@@ -225,6 +225,44 @@ Describe 'Initialize-DeploymentLogging dry-run folder (state isolation invariant
     }
 }
 
+
+# Kept as its own Describe for the same reason as "Initialize-DeploymentLogging dry-run
+# folder" above: avoids the sibling-It Pester scope collision documented there.
+Describe 'Get-DeploymentReportRoot shadow folder (state isolation invariant, FABLE_TASKS.md T07c)' {
+
+    BeforeAll {
+        $script:ReportTestRoot = Join-Path $TestDrive 'usbroot-reports'
+        New-Item -ItemType Directory -Path $script:ReportTestRoot -Force | Out-Null
+    }
+
+    AfterEach {
+        . Set-DryRunEnv -Value $null
+    }
+
+    It 'resolves the real per-device report folder when dry-run is off, and a nested dryrun folder when on' {
+        $identityMock = {
+            @{
+                serial_number = 'TEST-SERIAL-003'
+                uuid          = '33333333-3333-3333-3333-333333333333'
+                computer_name = 'TESTPC3'
+            }
+        }
+
+        . Set-DryRunEnv -Value $null
+        Mock Get-DeviceIdentity $identityMock
+        $realRoot = Get-DeploymentReportRoot -UsbRoot $script:ReportTestRoot
+        # Get-SafeName (used by Get-DeviceFolderName) collapses hyphens to underscores.
+        Split-Path -Leaf $realRoot | Should -Be 'TEST_SERIAL_003'
+        Test-Path -LiteralPath $realRoot -PathType Container | Should -BeTrue
+
+        . Set-DryRunEnv -Value '1'
+        Mock Get-DeviceIdentity $identityMock
+        $dryRoot = Get-DeploymentReportRoot -UsbRoot $script:ReportTestRoot
+        $dryRoot | Should -Be (Join-Path $realRoot 'dryrun')
+        Test-Path -LiteralPath $dryRoot -PathType Container | Should -BeTrue
+    }
+}
+
 Describe 'Invoke-ExternalCommand dry-run refusal' {
 
     BeforeEach {

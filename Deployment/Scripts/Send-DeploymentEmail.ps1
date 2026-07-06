@@ -114,6 +114,24 @@ try {
         "Windows 11 deployment status: $status`nComputer: $computer`nRun ID: $runId`nLast error: $errorMessage"
     }
 
+    if (Test-DeploymentDryRun) {
+        # Full SMTP config validation and attachment resolution above already ran for real
+        # (FABLE_TASKS.md T07c) -- including the real logs zip, so max_attachment_mb checks are
+        # accurate. No SmtpClient/MailMessage is ever constructed here, so an unreachable SMTP
+        # host cannot make this throw: no connection is attempted at all in dry-run.
+        Write-DryRunAction -State $state -Step 'EmailReport' -Action "would send email via $smtpServer`:$($smtp.smtp_port) to $($toAddresses -join ', ') with $(@($attachments).Count) attachment(s)" -Data ([ordered]@{
+                smtp_server  = $smtpServer
+                smtp_port    = [int]$smtp.smtp_port
+                to_addresses = $toAddresses
+                cc_addresses = @($smtp.cc_addresses | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                subject      = $subject
+                attachments  = @($attachments)
+            })
+        Write-Log -Level Success -Message "Dry run: deployment notification email would be sent to $($toAddresses -join ', ') via $smtpServer`:$($smtp.smtp_port) (not sent)."
+        foreach ($tempFile in $tempFiles) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
+        return
+    }
+
     $mail = New-Object System.Net.Mail.MailMessage
     try {
         $fromAddress = [string]$smtp.from_address

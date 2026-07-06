@@ -13,6 +13,8 @@ $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
 if ([string]::IsNullOrWhiteSpace($StatePath)) { $StatePath = $paths.StateFile }
 $config = Get-DeploymentConfig -UsbRoot $UsbRoot
 $packageConfig = Read-JsonFile -Path $paths.WingetFile -Required
+$state = Read-DeploymentState -StatePath $StatePath
+if (-not $state) { throw "Deployment state not found at $StatePath" }
 
 # winget exit codes are HRESULTs, not MSI-style codes (signed int32 values of 0x8A15xxxx).
 $script:WingetNoApplicationsFound = -1978335212      # 0x8A150014
@@ -79,7 +81,10 @@ foreach ($package in @($packageConfig.packages)) {
 
     Write-Log -Level Info -Message "Checking winget package $displayName ($id)."
     # 'winget list' exits with NO_APPLICATIONS_FOUND (not 0/1) when the package is absent.
-    $list = Invoke-ExternalCommand -FilePath $winget -Arguments @('list', '--id', $id, '--exact', '--accept-source-agreements') -AllowedExitCodes @(0, 1, $script:WingetNoApplicationsFound) -LogName ("winget-list-{0}.log" -f (Get-SafeName -Value $id))
+    # -ReadOnly: a detection query, never a mutation, so it runs for real even in dry-run
+    # (FABLE_TASKS.md T07b) -- without it, Common.ps1's generic dry-run refusal (T05) would
+    # intercept this call too and report every package as installed regardless of truth.
+    $list = Invoke-ExternalCommand -FilePath $winget -Arguments @('list', '--id', $id, '--exact', '--accept-source-agreements') -AllowedExitCodes @(0, 1, $script:WingetNoApplicationsFound) -LogName ("winget-list-{0}.log" -f (Get-SafeName -Value $id)) -ReadOnly -State $state
     if ($list.exit_code -eq 0) {
         Write-Log -Level Success -Message "$displayName is already installed."
         $results += ,([ordered]@{ id = $id; display_name = $displayName; status = 'AlreadyInstalled'; required = $required })
@@ -99,6 +104,14 @@ foreach ($package in @($packageConfig.packages)) {
         $wingetArgs += @('--override', $installArguments)
     }
 
+    if (Test-DeploymentDryRun) {
+        $argumentLine = ConvertTo-ProcessArgumentString -Arguments $wingetArgs
+        Write-DryRunAction -State $state -Step 'WingetApps' -Action "would winget install $id ($argumentLine)" -Data ([ordered]@{ id = $id; display_name = $displayName; arguments = $wingetArgs; required = $required })
+        Write-Log -Level Success -Message "Dry run: $displayName would be installed via winget."
+        $results += ,([ordered]@{ id = $id; display_name = $displayName; status = 'DryRun'; required = $required })
+        continue
+    }
+
     try {
         $install = Invoke-ExternalCommand -FilePath $winget -Arguments $wingetArgs -AllowedExitCodes @(0, 3010, $script:WingetRebootRequiredToFinish, $script:WingetRebootRequiredToInstall) -LogName ("winget-install-{0}.log" -f (Get-SafeName -Value $id))
         $status = if ($install.exit_code -ne 0) { 'InstalledRebootRequired' } else { 'Installed' }
@@ -110,6 +123,13 @@ foreach ($package in @($packageConfig.packages)) {
         $results += ,([ordered]@{ id = $id; display_name = $displayName; status = 'Failed'; required = $required; error = $_.Exception.Message })
         if ($required -and [bool]$config.fail_on_missing_required_app) { throw $message }
     }
+}
+
+if (Test-DeploymentDryRun) {
+    # Persists the dryrun_actions accumulated above (T05's Write-DryRunAction mutates $state
+    # in-memory only) -- this script previously never wrote state at all, so a dry-run-only
+    # persist here is added without changing the untouched-outside-dry-run behaviour.
+    Write-DeploymentState -State $state -StatePath $StatePath
 }
 
 Write-StructuredLog -Level Info -Message 'winget app installation completed' -Data $results
