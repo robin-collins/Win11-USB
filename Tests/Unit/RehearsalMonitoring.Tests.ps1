@@ -55,13 +55,18 @@ Describe 'Get-RehearsalTerminalState (T12 terminal-state classification)' {
 
 Describe 'Get-RehearsalArtifactFolder (T12 artifact path construction)' {
 
+    # Drive-letter-free paths are used deliberately: Join-Path with a literal 'C:\...' path
+    # throws DriveNotFoundException on non-Windows pwsh (no C: PSDrive exists), which this test
+    # suite must run under. With $ErrorActionPreference = 'Continue' that non-terminating error
+    # was silently swallowed and both sides of Should -Be evaluated to $null, so this previously
+    # "passed" without actually comparing anything.
     It 'joins the artifact root and timestamp into one path' {
-        Get-RehearsalArtifactFolder -ArtifactRoot 'C:\Repo\Test\Rehearsal\Artifacts' -Timestamp '20260706-143000' |
-            Should -Be (Join-Path 'C:\Repo\Test\Rehearsal\Artifacts' '20260706-143000')
+        Get-RehearsalArtifactFolder -ArtifactRoot 'Repo\Test\Rehearsal\Artifacts' -Timestamp '20260706-143000' |
+            Should -Be (Join-Path 'Repo\Test\Rehearsal\Artifacts' '20260706-143000')
     }
 
     It 'adversarial: does not collapse or alter a timestamp that looks path-like' {
-        Get-RehearsalArtifactFolder -ArtifactRoot 'C:\Artifacts' -Timestamp '2026-07-06_14-30-00' |
-            Should -Be (Join-Path 'C:\Artifacts' '2026-07-06_14-30-00')
+        Get-RehearsalArtifactFolder -ArtifactRoot 'Artifacts' -Timestamp '2026-07-06_14-30-00' |
+            Should -Be (Join-Path 'Artifacts' '2026-07-06_14-30-00')
     }
 }

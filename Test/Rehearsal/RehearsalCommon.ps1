@@ -412,6 +412,7 @@ function Get-RehearsalVmPaths {
         .OUTPUTS
             Ordered hashtable: @{ VmFolder = <string>; OsDiskPath = <string> }
     #>
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$VmName,
@@ -533,6 +534,7 @@ function New-RehearsalVm {
             the resulting VM actually boots the ISO with Secure Boot ON and TPM present per
             Get-VMSecurity -- can only be checked on such a host.
     #>
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$VmName,

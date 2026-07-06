@@ -1475,3 +1475,86 @@ function Get-DeploymentReportRoot {
     New-Item -ItemType Directory -Path $reportRoot -Force -ErrorAction Stop | Out-Null
     return $reportRoot
 }
+
+function Write-DryRunSummaryReport {
+    <#
+        Aggregates $State.dryrun_actions (Write-DryRunAction's audit trail, above) into a single
+        Markdown report grouped by step (FABLE_TASKS.md T08). Reuses Get-DeploymentReportRoot,
+        which is already dry-run-shadow-aware since T07c, so the report naturally lands under
+        the dry run's own report folder instead of a real deployment's Deployment\Reports tree.
+
+        -SummaryLine carries in the exact "DRYRUN RESULT: steps=<n> actions=<n>
+        would-reboot=<n>" text Start-Deployment.ps1's own Get-DryRunSummaryLine already computed
+        for the console/log line, rather than recomputing the same counts a second time here --
+        the report and the console/log line can never disagree about the totals.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$State,
+        [Parameter(Mandatory = $true)][string]$UsbRoot,
+        [Parameter(Mandatory = $true)][string]$SummaryLine
+    )
+
+    $actions = @()
+    if ($State.ContainsKey('dryrun_actions') -and $null -ne $State.dryrun_actions) {
+        $actions = @($State.dryrun_actions)
+    }
+
+    # Group into a plain Hashtable keyed by step name (actions kept in recording order within
+    # each step), then walk Get-DeploymentSteps' own canonical order below so the report reads
+    # top-to-bottom the same way the deployment itself runs, rather than in whatever order
+    # actions happened to be appended across steps.
+    $byStep = @{}
+    foreach ($action in $actions) {
+        $stepName = [string]$action.step
+        if (-not $byStep.ContainsKey($stepName)) { $byStep[$stepName] = @() }
+        # The unary comma prevents PowerShell's += from enumerating $action's own key/value
+        # pairs (it is a Hashtable/OrderedDictionary, which is IEnumerable) instead of appending
+        # it as a single element -- the same hazard $createdUsers/$results += ,(...) already
+        # guards against elsewhere in this codebase (see Start-Deployment.ps1, Install-WingetApps.ps1).
+        $byStep[$stepName] += ,$action
+    }
+
+    $canonicalStepNames = @(Get-DeploymentSteps | Where-Object { $byStep.ContainsKey($_) })
+    # A handful of Write-DryRunAction call sites use a fallback step name that is not one of
+    # Get-DeploymentSteps' canonical names (Get-DryRunStepName's own 'ExternalCommand'/
+    # 'ResumeTask'/'AutoLogon'/'Reboot' defaults, used when a caller has no current_step to pass
+    # through). Those must still be rendered -- nothing recorded here is ever silently dropped --
+    # so they are appended after the canonical steps instead of being skipped for not matching a
+    # known name.
+    $extraStepNames = @($byStep.Keys | Where-Object { $canonicalStepNames -notcontains $_ } | Sort-Object)
+    $orderedStepNames = @($canonicalStepNames + $extraStepNames)
+
+    $lines = @(
+        '# Dry Run Summary',
+        '',
+        $SummaryLine,
+        '',
+        "Run ID: $($State.deployment_run_id)",
+        "Generated: $((Get-Date).ToString('o'))",
+        ''
+    )
+
+    if ($orderedStepNames.Count -eq 0) {
+        $lines += 'No dry-run actions were recorded for this run.'
+    } else {
+        foreach ($stepName in $orderedStepNames) {
+            $lines += "## $stepName"
+            $lines += ''
+            foreach ($action in $byStep[$stepName]) {
+                # Rendered as a single compact JSON blob so nothing in .data is silently
+                # dropped, no matter how it is shaped (scalar, nested hashtable, or array).
+                $dataJson = if ($null -ne $action.data) { ($action.data | ConvertTo-Json -Depth 20 -Compress) } else { '(none)' }
+                $lines += "- $($action.timestamp) -- $($action.action) -- data: $dataJson"
+            }
+            $lines += ''
+        }
+    }
+
+    $reportRoot = Get-DeploymentReportRoot -UsbRoot $UsbRoot
+    $reportPath = Join-Path $reportRoot "dryrun-summary-$($State.deployment_run_id).md"
+    Set-Content -LiteralPath $reportPath -Value $lines -Encoding UTF8 -Force
+    Write-Log -Level Success -Message "Dry-run summary report written to $reportPath"
+    return $reportPath
+}
