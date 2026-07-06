@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'Interactive technician prompts (resume/restart/quit choices) and colored status output at the console; Write-Log is used in parallel for the audited/structured log.')]
 [CmdletBinding()]
 param(
     [string]$UsbRoot,
@@ -166,6 +167,7 @@ function Get-LocalUserDefinitions {
 }
 
 function New-ConfiguredLocalUserPassword {
+    [Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification = 'New-LocalUser requires a SecureString credential. Both plaintext sources here are toolkit-managed secrets (the .env/config-plumbed OSIT password, or a freshly generated random password written to a protected report file), not user-typed console input, so ConvertTo-SecureString is the required bridge into the Microsoft.PowerShell.LocalAccounts API, not a security downgrade.')]
     param(
         [hashtable]$Account,
         [hashtable]$Config,

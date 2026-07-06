@@ -15,7 +15,7 @@ $config = Get-DeploymentConfig -UsbRoot $UsbRoot
 $state = Read-DeploymentState -StatePath $StatePath
 if (-not $state) { throw "Deployment state not found at $StatePath" }
 
-function Ensure-PSWindowsUpdate {
+function Initialize-PSWindowsUpdateModule {
     param([bool]$Bootstrap)
 
     $module = Get-Module -ListAvailable -Name PSWindowsUpdate | Sort-Object Version -Descending | Select-Object -First 1
@@ -123,7 +123,7 @@ function Invoke-ComWindowsUpdateCycle {
 $maxCycles = [int]$config.windows_update_max_cycles
 if ($maxCycles -lt 1) { $maxCycles = 1 }
 $includeMicrosoftUpdate = [bool]$config.windows_update_include_microsoft_update
-$useModule = Ensure-PSWindowsUpdate -Bootstrap ([bool]$config.pswindowsupdate_bootstrap)
+$useModule = Initialize-PSWindowsUpdateModule -Bootstrap ([bool]$config.pswindowsupdate_bootstrap)
 
 for ($cycle = ([int]$state.update_cycle + 1); $cycle -le $maxCycles; $cycle++) {
     $state.update_cycle = $cycle

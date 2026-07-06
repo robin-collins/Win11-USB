@@ -1,3 +1,4 @@
+[Diagnostics.CodeAnalysis.SuppressMessage('PSAvoidUsingWriteHost', '', Justification = 'This is a technician-facing status CLI; Write-Host provides the colored, human-readable console report (Write-DeploymentStatusReport) that this script exists to show. The machine-readable -Json path bypasses this entirely.')]
 [CmdletBinding()]
 param(
     [string]$UsbRoot,
@@ -43,11 +44,17 @@ function Get-DeploymentStatusSnapshot {
                 next_run_time   = if ($taskInfo) { $taskInfo.NextRunTime } else { $null }
             }
         }
-    } catch {}
+    } catch {
+        Write-Verbose "Could not query the resume scheduled task (non-fatal): $($_.Exception.Message)"
+    }
     if (-not $resumeTask) { $resumeTask = [ordered]@{ registered = $false } }
 
     $pendingReboot = $false
-    try { $pendingReboot = Test-PendingReboot } catch {}
+    try {
+        $pendingReboot = Test-PendingReboot
+    } catch {
+        Write-Verbose "Could not determine pending-reboot status (non-fatal): $($_.Exception.Message)"
+    }
 
     $logHeartbeat = $null
     try {
@@ -63,10 +70,16 @@ function Get-DeploymentStatusSnapshot {
                 seconds_since_activity = [int]((Get-Date) - $lastWrite).TotalSeconds
             }
         }
-    } catch {}
+    } catch {
+        Write-Verbose "Could not read the log heartbeat (non-fatal): $($_.Exception.Message)"
+    }
 
     $stateAgeSeconds = $null
-    try { $stateAgeSeconds = [int]((Get-Date) - [datetime]$state.timestamp).TotalSeconds } catch {}
+    try {
+        $stateAgeSeconds = [int]((Get-Date) - [datetime]$state.timestamp).TotalSeconds
+    } catch {
+        Write-Verbose "Could not compute state age (non-fatal): $($_.Exception.Message)"
+    }
 
     $overallStatus = 'Stalled'
     $message = 'Deployment state exists but no active process, pending reboot, or error explains the current state. This may indicate a crashed or killed process.'
