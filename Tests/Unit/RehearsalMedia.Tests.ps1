@@ -184,6 +184,133 @@ Describe 'New-RehearsalDotEnvContent' {
     }
 }
 
+Describe 'Get-RehearsalKnownScenarioNames (T14)' {
+    It 'always includes Standard' {
+        Get-RehearsalKnownScenarioNames | Should -Contain 'Standard'
+    }
+
+    It 'includes every real scenario folder under Test\Rehearsal\Scenarios' {
+        $names = Get-RehearsalKnownScenarioNames
+        foreach ($expected in @('NoWipe', 'Handover', 'ResumeKill', 'AdditionalUsers')) {
+            $names | Should -Contain $expected
+        }
+    }
+}
+
+Describe 'Assert-RehearsalScenarioKnown (T14)' {
+    It 'does not throw for Standard' {
+        { Assert-RehearsalScenarioKnown -Scenario 'Standard' } | Should -Not -Throw
+    }
+
+    It 'does not throw for a real on-disk scenario, case-insensitively' {
+        { Assert-RehearsalScenarioKnown -Scenario 'nowipe' } | Should -Not -Throw
+    }
+
+    It 'throws with a ''not recognised'' message for an unknown scenario' {
+        { Assert-RehearsalScenarioKnown -Scenario 'DoesNotExist' } | Should -Throw '*not recognised*'
+    }
+}
+
+Describe 'Resolve-RehearsalScenarioOverlay (T14)' {
+    It 'returns the same overlay as Get-RehearsalStandardScenarioOverlay for Standard' {
+        $resolved = Resolve-RehearsalScenarioOverlay -Scenario 'Standard'
+        $literal = Get-RehearsalStandardScenarioOverlay
+        $resolved.wipe_repartition_drive | Should -Be $literal.wipe_repartition_drive
+        $resolved.computer_name_mode | Should -Be $literal.computer_name_mode
+    }
+
+    It 'loads NoWipe from disk with wipe_repartition_drive flipped false' {
+        $overlay = Resolve-RehearsalScenarioOverlay -Scenario 'NoWipe'
+        $overlay.wipe_repartition_drive | Should -BeFalse
+        $overlay.computer_name_mode | Should -Be 'serial'
+    }
+
+    It 'loads Handover from disk with local_deployment_handover.enabled true' {
+        $overlay = Resolve-RehearsalScenarioOverlay -Scenario 'Handover'
+        $overlay.local_deployment_handover.enabled | Should -BeTrue
+        $overlay.local_deployment_handover.local_path | Should -Be 'C:\1S-WIN11'
+    }
+
+    It 'loads AdditionalUsers from disk with one random-password additional_local_users entry' {
+        $overlay = Resolve-RehearsalScenarioOverlay -Scenario 'AdditionalUsers'
+        $overlay.allow_random_password_export | Should -BeTrue
+        @($overlay.additional_local_users).Count | Should -Be 1
+        $overlay.additional_local_users[0].username | Should -Be 'RehearsalTech'
+        $overlay.additional_local_users[0].password_mode | Should -Be 'random'
+    }
+
+    It 'loads ResumeKill from disk with the same config baseline as Standard (only the harness injects a failure, not the config)' {
+        $overlay = Resolve-RehearsalScenarioOverlay -Scenario 'ResumeKill'
+        $overlay.wipe_repartition_drive | Should -BeTrue
+        $overlay.computer_name_mode | Should -Be 'serial'
+    }
+
+    It 'is case-insensitive to the scenario name' {
+        { Resolve-RehearsalScenarioOverlay -Scenario 'nowipe' } | Should -Not -Throw
+    }
+
+    It 'adversarial: throws a clear error for an unrecognised scenario' {
+        { Resolve-RehearsalScenarioOverlay -Scenario 'DoesNotExist' } | Should -Throw '*not recognised*'
+    }
+}
+
+Describe 'Get-RehearsalScenarioWingetPackages (T14)' {
+    It 'falls back to the Standard placeholder package for every named scenario (none override it)' {
+        foreach ($scenario in @('Standard', 'NoWipe', 'Handover', 'ResumeKill', 'AdditionalUsers')) {
+            @(Get-RehearsalScenarioWingetPackages -Scenario $scenario).Count | Should -Be 1
+        }
+    }
+}
+
+Describe 'Get-RehearsalScenarioFailureInjection (T14)' {
+    It 'returns $null for scenarios with no failure injection' {
+        foreach ($scenario in @('Standard', 'NoWipe', 'AdditionalUsers')) {
+            Get-RehearsalScenarioFailureInjection -Scenario $scenario | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'resolves ResumeKill''s injection: force-stop/restart, triggered when WindowsUpdates starts' {
+        $injection = Get-RehearsalScenarioFailureInjection -Scenario 'ResumeKill'
+        $injection.Action | Should -Be 'ForceStopRestartVm'
+        $injection.TriggerStep | Should -Be 'WindowsUpdates'
+        $injection.TriggerWhen | Should -Be 'Started'
+    }
+
+    It 'resolves Handover''s injection: hot-remove the media disk, triggered once LocalHandover completes' {
+        $injection = Get-RehearsalScenarioFailureInjection -Scenario 'Handover'
+        $injection.Action | Should -Be 'HotRemoveMediaDisk'
+        $injection.TriggerStep | Should -Be 'LocalHandover'
+        $injection.TriggerWhen | Should -Be 'Completed'
+    }
+}
+
+Describe 'Test-RehearsalFailureInjectionTriggered (T14)' {
+    BeforeEach {
+        $script:StartedInjection = @{ TriggerStep = 'WindowsUpdates'; TriggerWhen = 'Started' }
+        $script:CompletedInjection = @{ TriggerStep = 'LocalHandover'; TriggerWhen = 'Completed' }
+    }
+
+    It '''Started'' fires as soon as CurrentStep matches, even before the step completes' {
+        Test-RehearsalFailureInjectionTriggered -Injection $script:StartedInjection -CurrentStep 'WindowsUpdates' -CompletedSteps @('Preflight') | Should -BeTrue
+    }
+
+    It '''Started'' also fires if the trigger step is already in CompletedSteps (a fast poll cycle could miss it mid-run)' {
+        Test-RehearsalFailureInjectionTriggered -Injection $script:StartedInjection -CurrentStep 'WingetApps' -CompletedSteps @('WindowsUpdates') | Should -BeTrue
+    }
+
+    It '''Started'' does not fire while a different step is current and the trigger step has not completed' {
+        Test-RehearsalFailureInjectionTriggered -Injection $script:StartedInjection -CurrentStep 'Preflight' -CompletedSteps @() | Should -BeFalse
+    }
+
+    It '''Completed'' does NOT fire merely because CurrentStep matches -- only once it is in CompletedSteps' {
+        Test-RehearsalFailureInjectionTriggered -Injection $script:CompletedInjection -CurrentStep 'LocalHandover' -CompletedSteps @() | Should -BeFalse
+    }
+
+    It '''Completed'' fires once the trigger step is in CompletedSteps' {
+        Test-RehearsalFailureInjectionTriggered -Injection $script:CompletedInjection -CurrentStep 'WindowsUpdates' -CompletedSteps @('LocalHandover') | Should -BeTrue
+    }
+}
+
 Describe 'New-RehearsalMedia platform guard' {
     It 'fails with one clear, actionable message when Hyper-V cmdlets are unavailable, instead of a cryptic error partway through' {
         # This sandbox has no Hyper-V module (Linux), so New-VHD etc. are genuinely absent --

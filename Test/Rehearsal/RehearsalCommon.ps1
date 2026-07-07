@@ -951,6 +951,185 @@ function Merge-RehearsalScenarioConfig {
     return Merge-Config -Base $BaseConfig -Override $effectiveOverlay
 }
 
+function Get-RehearsalScenariosRoot {
+    <#
+        .SYNOPSIS
+            Path to Test\Rehearsal\Scenarios, where T14's named scenario overlays live.
+            Pure function of the already-resolved $script:RehearsalRepoRoot.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    return Join-Path $script:RehearsalRepoRoot 'Test\Rehearsal\Scenarios'
+}
+
+function Get-RehearsalKnownScenarioNames {
+    <#
+        .SYNOPSIS
+            Every scenario name New-RehearsalMedia will accept: 'Standard' (always -- it has an
+            in-memory baseline via Get-RehearsalStandardScenarioOverlay even if no on-disk folder
+            exists) plus every subfolder of Test\Rehearsal\Scenarios that actually exists on disk.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Object[]])]
+    param()
+
+    $names = New-Object 'System.Collections.Generic.List[string]'
+    $names.Add('Standard') | Out-Null
+
+    $scenariosRoot = Get-RehearsalScenariosRoot
+    if (Test-Path -LiteralPath $scenariosRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $scenariosRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Name -ine 'Standard') { $names.Add($_.Name) | Out-Null }
+        }
+    }
+
+    return @($names | Select-Object -Unique)
+}
+
+function Assert-RehearsalScenarioKnown {
+    <#
+        .SYNOPSIS
+            Throws a clear, actionable error if -Scenario is neither 'Standard' nor a subfolder
+            of Test\Rehearsal\Scenarios (FABLE_TASKS.md T14). Deliberately cheap (a
+            Test-Path/Get-ChildItem check only, no JSON parsing) so New-RehearsalMedia can call
+            this before its Hyper-V cmdlet guard and before touching -WorkingDirectory, matching
+            the existing "reject before doing any real work" convention already used by that
+            guard and by Test-RehearsalDefaultSwitch / Test-RehearsalVmNameAvailable.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Scenario)
+
+    $known = Get-RehearsalKnownScenarioNames
+    if (@($known) -icontains $Scenario) { return }
+
+    throw "Rehearsal scenario '$Scenario' is not recognised. Known scenarios: $($known -join ', ') (add a new one under Test\Rehearsal\Scenarios\<name>\deployment_config.overlay.json; see FABLE_TASKS.md T14)."
+}
+
+function Resolve-RehearsalScenarioOverlay {
+    <#
+        .SYNOPSIS
+            Resolves the deployment_config.json overlay hashtable for -Scenario (FABLE_TASKS.md
+            T14).
+
+        .DESCRIPTION
+            'Standard' returns Get-RehearsalStandardScenarioOverlay's existing in-memory literal
+            unchanged -- that function is already unit-tested and is New-RehearsalMedia's
+            long-standing default baseline, so this never adds a filesystem dependency to the one
+            scenario that worked before T14 existed. Every other scenario name is loaded from
+            Test\Rehearsal\Scenarios\<name>\deployment_config.overlay.json.
+
+            Requires ConvertTo-PlainHashtable (Deployment\Scripts\Common.ps1) to already be
+            loaded in the current session for any non-Standard scenario, matching this file's
+            existing convention (New-RehearsalMedia dot-sources Common.ps1 before calling this).
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory = $true)][string]$Scenario)
+
+    Assert-RehearsalScenarioKnown -Scenario $Scenario
+
+    if ($Scenario -ieq 'Standard') {
+        return Get-RehearsalStandardScenarioOverlay
+    }
+
+    $overlayPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $Scenario) 'deployment_config.overlay.json'
+    if (-not (Test-Path -LiteralPath $overlayPath -PathType Leaf)) {
+        throw "Rehearsal scenario '$Scenario' has no deployment_config.overlay.json at $overlayPath."
+    }
+
+    $raw = Get-Content -LiteralPath $overlayPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    return ConvertTo-PlainHashtable $raw
+}
+
+function Get-RehearsalScenarioWingetPackages {
+    <#
+        .SYNOPSIS
+            Resolves the winget_packages.json content for -Scenario (FABLE_TASKS.md T14).
+
+        .DESCRIPTION
+            Falls back to Get-RehearsalStandardWingetPackages' single placeholder package when
+            -Scenario has no winget_packages.overlay.json of its own -- none of T14's named
+            scenarios need a different package list, only Standard's own placeholder.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Object[]])]
+    param([Parameter(Mandatory = $true)][string]$Scenario)
+
+    if ($Scenario -ine 'Standard') {
+        $overlayPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $Scenario) 'winget_packages.overlay.json'
+        if (Test-Path -LiteralPath $overlayPath -PathType Leaf) {
+            $raw = Get-Content -LiteralPath $overlayPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            return @(ConvertTo-PlainHashtable $raw.packages)
+        }
+    }
+
+    return @(Get-RehearsalStandardWingetPackages)
+}
+
+function Get-RehearsalScenarioFailureInjection {
+    <#
+        .SYNOPSIS
+            Resolves the optional failure-injection descriptor for -Scenario (FABLE_TASKS.md
+            T14: ResumeKill, Handover), from Test\Rehearsal\Scenarios\<name>\scenario.json.
+
+        .DESCRIPTION
+            Returns $null when the scenario has no scenario.json, or it has one but no
+            failure_injection key -- the common case (Standard, NoWipe, AdditionalUsers inject
+            no failure). Otherwise returns an ordered hashtable @{ TriggerStep; Action;
+            Description }, matching Invoke-RehearsalFailureInjection's (RehearsalMonitoring.ps1)
+            expected shape.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param([Parameter(Mandatory = $true)][string]$Scenario)
+
+    if ($Scenario -ieq 'Standard') { return $null }
+
+    $scenarioJsonPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $Scenario) 'scenario.json'
+    if (-not (Test-Path -LiteralPath $scenarioJsonPath -PathType Leaf)) { return $null }
+
+    $raw = Get-Content -LiteralPath $scenarioJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if (-not ($raw.PSObject.Properties.Match('failure_injection').Count -gt 0) -or -not $raw.failure_injection) { return $null }
+
+    $injection = $raw.failure_injection
+    $triggerWhen = if ($injection.PSObject.Properties.Match('trigger_when').Count -gt 0) { [string]$injection.trigger_when } else { 'Started' }
+    return [ordered]@{
+        TriggerStep = [string]$injection.trigger_step
+        TriggerWhen = $triggerWhen
+        Action      = [string]$injection.action
+        Description = if ($injection.PSObject.Properties.Match('description').Count -gt 0) { [string]$injection.description } else { '' }
+    }
+}
+
+function Test-RehearsalFailureInjectionTriggered {
+    <#
+        .SYNOPSIS
+            Pure function: does a guest status snapshot's current_step/completed_steps satisfy
+            -Injection's trigger condition (FABLE_TASKS.md T14)?
+
+        .DESCRIPTION
+            -Injection.TriggerWhen 'Started' fires as soon as -CurrentStep equals TriggerStep
+            (the step is in progress) or has already completed (covers a fast step a poll cycle
+            could miss mid-run). 'Completed' fires only once TriggerStep is in -CompletedSteps --
+            deliberately NOT satisfied merely by -CurrentStep matching, since a scenario like
+            Handover needs the step's own end-of-step actions (root switch, toast) to have
+            already run before the injection makes sense.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Injection,
+        [AllowEmptyString()][string]$CurrentStep = '',
+        [string[]]$CompletedSteps = @()
+    )
+
+    $completed = @($CompletedSteps) -contains $Injection.TriggerStep
+    if ($Injection.TriggerWhen -ieq 'Completed') { return $completed }
+    return $completed -or ($CurrentStep -eq $Injection.TriggerStep)
+}
+
 function New-RehearsalDotEnvContent {
     <#
         .SYNOPSIS
@@ -1037,8 +1216,10 @@ function New-RehearsalMedia {
             Invoke-DeploymentRehearsal.ps1's -WorkingDirectory). Created if it does not exist.
 
         .PARAMETER Scenario
-            Named overlay to apply. Only 'Standard' exists until T14 formalises named scenario
-            overlays under Test\Rehearsal\Scenarios\<name>. Case-insensitive.
+            Named overlay to apply. 'Standard' is always accepted (its baseline is the in-memory
+            Get-RehearsalStandardScenarioOverlay literal); any other name must have a matching
+            Test\Rehearsal\Scenarios\<name>\deployment_config.overlay.json (FABLE_TASKS.md T14).
+            Case-insensitive.
 
         .PARAMETER VolumeLabel
             NTFS label to format the media volume with. Defaults to '1S-WIN11', matching
@@ -1074,9 +1255,7 @@ function New-RehearsalMedia {
         [int]$SizeGB = 16
     )
 
-    if ($Scenario -ine 'Standard') {
-        throw "Rehearsal scenario '$Scenario' is not recognised. Only 'Standard' is implemented (T14 formalises named scenario overlays under Test\Rehearsal\Scenarios\<name>)."
-    }
+    Assert-RehearsalScenarioKnown -Scenario $Scenario
 
     # Guard every Hyper-V/Storage cmdlet this function needs up front, matching the
     # Get-Command -ErrorAction SilentlyContinue convention already used by
@@ -1179,13 +1358,13 @@ function New-RehearsalMedia {
         }
 
         $baseConfig = Get-DeploymentConfig -UsbRoot $mountedRoot
-        $scenarioOverlay = Get-RehearsalStandardScenarioOverlay
+        $scenarioOverlay = Resolve-RehearsalScenarioOverlay -Scenario $Scenario
         $mergedConfig = Merge-RehearsalScenarioConfig -BaseConfig $baseConfig -Overlay $scenarioOverlay
         Write-JsonFile -Path $mediaConfigPath -InputObject $mergedConfig
         Write-Verbose "Scenario '$Scenario' overlay merged and written to $mediaConfigPath"
 
         $mediaWingetPackagesPath = Join-Path $mountedRoot 'Deployment\Config\winget_packages.json'
-        Write-JsonFile -Path $mediaWingetPackagesPath -InputObject @{ packages = @(Get-RehearsalStandardWingetPackages) }
+        Write-JsonFile -Path $mediaWingetPackagesPath -InputObject @{ packages = @(Get-RehearsalScenarioWingetPackages -Scenario $Scenario) }
 
         $generatedUnattend = New-GeneratedUnattendContent -TemplatePath $templatePath -Config $mergedConfig -Password $ositPassword
 

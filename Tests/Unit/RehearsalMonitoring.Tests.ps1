@@ -17,7 +17,9 @@
 #>
 
 BeforeAll {
+    $script:CommonScriptPath = Join-Path $PSScriptRoot '..\..\Test\Rehearsal\RehearsalCommon.ps1'
     $script:MonitoringScriptPath = Join-Path $PSScriptRoot '..\..\Test\Rehearsal\RehearsalMonitoring.ps1'
+    . $script:CommonScriptPath
     . $script:MonitoringScriptPath
 }
 
@@ -68,5 +70,16 @@ Describe 'Get-RehearsalArtifactFolder (T12 artifact path construction)' {
     It 'adversarial: does not collapse or alter a timestamp that looks path-like' {
         Get-RehearsalArtifactFolder -ArtifactRoot 'Artifacts' -Timestamp '2026-07-06_14-30-00' |
             Should -Be (Join-Path 'Artifacts' '2026-07-06_14-30-00')
+    }
+}
+
+Describe 'Invoke-RehearsalFailureInjection (T14) Hyper-V guard' {
+    # Matches this file's own convention (see header comment): this sandbox genuinely lacks
+    # every Hyper-V cmdlet, so calling Assert-HyperVAvailable -- directly, or indirectly via
+    # Invoke-RehearsalFailureInjection -- throws for real here, doubling as a regression check
+    # that this function calls the guard first, before doing anything else.
+    It 'throws (via Assert-HyperVAvailable) before attempting either injection action' {
+        $injection = @{ TriggerStep = 'WindowsUpdates'; TriggerWhen = 'Started'; Action = 'ForceStopRestartVm'; Description = '' }
+        { Invoke-RehearsalFailureInjection -VmName 'Rehearsal-Test' -Injection $injection } | Should -Throw '*Hyper-V*'
     }
 }

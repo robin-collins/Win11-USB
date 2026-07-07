@@ -1,0 +1,17 @@
+{
+  "wipe_repartition_drive": true,
+  "require_ac_power": false,
+  "msp_wifi_setup": { "enabled": false },
+  "computer_name_mode": "serial",
+  "install_winget_apps": true,
+  "datto_rmm_site_id_uuid": "",
+  "allow_random_password_export": true,
+  "additional_local_users": [
+    {
+      "username": "RehearsalTech",
+      "enabled": true,
+      "password_mode": "random",
+      "groups": ["Users"]
+    }
+  ]
+}

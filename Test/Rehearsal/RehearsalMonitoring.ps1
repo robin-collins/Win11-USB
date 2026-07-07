@@ -315,6 +315,77 @@ function Invoke-RehearsalGuestStatusPoll {
     }
 }
 
+function Invoke-RehearsalFailureInjection {
+    <#
+        .SYNOPSIS
+            Performs the FABLE_TASKS.md T14 failure-injection action for a scenario, once
+            Watch-RehearsalDeployment observes its trigger condition in a guest status snapshot.
+
+        .DESCRIPTION
+            Two actions:
+              - 'ForceStopRestartVm' (ResumeKill): force-stops the VM (Stop-VM -TurnOff,
+                simulating a crash/power loss) then starts it again, proving the resume
+                scheduled task + autologon chain brings the run to Complete anyway.
+              - 'HotRemoveMediaDisk' (Handover): removes the rehearsal media VHDX from the
+                running VM's SCSI controller while it is still running (New-RehearsalVm attaches
+                it at SCSI 0/1, RehearsalCommon.ps1), simulating a technician ejecting the USB
+                the moment the handover toast appears.
+            Never throws: a failed injection is logged as a warning and returned as $false so the
+            caller's monitoring loop keeps going -- a failed injection should surface as a failed
+            rehearsal (the scenario's own assertions not passing), not as a harness crash.
+
+        .PARAMETER Injection
+            The descriptor returned by RehearsalCommon.ps1's Get-RehearsalScenarioFailureInjection
+            (@{ TriggerStep; TriggerWhen; Action; Description }).
+
+        .PARAMETER MediaVhdxPath
+            Required for the 'HotRemoveMediaDisk' action: the exact VHDX path New-RehearsalMedia
+            returned, used to find the matching VM hard disk drive.
+
+        .NOTES
+            UNVERIFIED ON REAL HYPER-V: requires a live, running VM to exercise for real.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][hashtable]$Injection,
+        [string]$MediaVhdxPath
+    )
+
+    Assert-HyperVAvailable
+
+    Write-Host "[Rehearsal] Failure injection triggered ('$($Injection.TriggerStep)' $($Injection.TriggerWhen)): $($Injection.Action). $($Injection.Description)" -ForegroundColor Magenta
+
+    try {
+        switch ($Injection.Action) {
+            'ForceStopRestartVm' {
+                Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                Start-Sleep -Seconds 5
+                Start-VM -Name $VmName -ErrorAction Stop
+                return $true
+            }
+            'HotRemoveMediaDisk' {
+                if ([string]::IsNullOrWhiteSpace($MediaVhdxPath)) {
+                    throw "Invoke-RehearsalFailureInjection: action 'HotRemoveMediaDisk' requires -MediaVhdxPath."
+                }
+                $drive = Get-VMHardDiskDrive -VMName $VmName -ErrorAction Stop | Where-Object { $_.Path -ieq $MediaVhdxPath }
+                if (-not $drive) {
+                    throw "Invoke-RehearsalFailureInjection: no VM hard disk drive on '$VmName' has path '$MediaVhdxPath'."
+                }
+                Remove-VMHardDiskDrive -VMHardDiskDrive $drive -ErrorAction Stop
+                return $true
+            }
+            default {
+                throw "Invoke-RehearsalFailureInjection: unrecognised failure-injection action '$($Injection.Action)'."
+            }
+        }
+    } catch {
+        Write-Warning "Failure injection ('$($Injection.Action)') did not complete cleanly: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Watch-RehearsalDeployment {
     <#
         .SYNOPSIS
@@ -335,6 +406,17 @@ function Watch-RehearsalDeployment {
             budget), not a relative duration -- this lets a caller share one deadline across
             both monitoring phases.
 
+        .PARAMETER FailureInjection
+            Optional FABLE_TASKS.md T14 failure-injection descriptor (RehearsalCommon.ps1's
+            Get-RehearsalScenarioFailureInjection), fired at most once via
+            Invoke-RehearsalFailureInjection the first poll cycle whose snapshot satisfies
+            Test-RehearsalFailureInjectionTriggered. $null (the default) means this scenario
+            injects no failure.
+
+        .PARAMETER MediaVhdxPath
+            The rehearsal media VHDX path (New-RehearsalMedia's .VhdxPath). Only required when
+            -FailureInjection's Action is 'HotRemoveMediaDisk'.
+
         .OUTPUTS
             Ordered hashtable: Result ('Success'/'Failed'/'Timeout'), Snapshot (the last guest
             status snapshot seen, or $null if the guest was never reachable), TimedOut (bool).
@@ -350,12 +432,15 @@ function Watch-RehearsalDeployment {
         [Parameter(Mandatory = $true)][pscredential]$Credential,
         [Parameter(Mandatory = $true)][datetime]$Deadline,
         [string]$VolumeLabel = '1S-WIN11',
-        [int]$PollSeconds = 30
+        [int]$PollSeconds = 30,
+        [hashtable]$FailureInjection = $null,
+        [string]$MediaVhdxPath
     )
 
     Assert-HyperVAvailable
 
     $preCompleteCheckpointTaken = $false
+    $failureInjectionFired = $false
     $lastSnapshot = $null
 
     while ((Get-Date) -lt $Deadline) {
@@ -369,6 +454,14 @@ function Watch-RehearsalDeployment {
             $snapshot = $poll.snapshot
             $lastSnapshot = $snapshot
             Write-Host "[Rehearsal] step $($snapshot.completed_step_count)/$($snapshot.total_step_count) - current: $($snapshot.current_step) - status: $($snapshot.overall_status)" -ForegroundColor Cyan
+
+            if ($FailureInjection -and -not $failureInjectionFired) {
+                $triggered = Test-RehearsalFailureInjectionTriggered -Injection $FailureInjection -CurrentStep ([string]$snapshot.current_step) -CompletedSteps @($snapshot.completed_steps)
+                if ($triggered) {
+                    Invoke-RehearsalFailureInjection -VmName $VmName -Injection $FailureInjection -MediaVhdxPath $MediaVhdxPath | Out-Null
+                    $failureInjectionFired = $true
+                }
+            }
 
             $reachedEmailReport = (@($snapshot.completed_steps) -contains 'EmailReport') -or ($snapshot.current_step -eq 'EmailReport')
             if (-not $preCompleteCheckpointTaken -and $reachedEmailReport) {
@@ -522,7 +615,9 @@ function Invoke-RehearsalMonitoring {
         [int]$SetupTimeoutMinutes = 40,
         [string]$VolumeLabel = '1S-WIN11',
         [bool]$IsHandoverScenario,
-        [string]$HandoverLocalPath = 'C:\1S-WIN11'
+        [string]$HandoverLocalPath = 'C:\1S-WIN11',
+        [hashtable]$FailureInjection = $null,
+        [string]$MediaVhdxPath
     )
 
     Assert-HyperVAvailable
@@ -546,7 +641,7 @@ function Invoke-RehearsalMonitoring {
         Write-Warning "Could not take the 'post-install' checkpoint: $($_.Exception.Message)"
     }
 
-    $watchResult = Watch-RehearsalDeployment -VmName $VmName -Credential $Credential -Deadline $overallDeadline -VolumeLabel $VolumeLabel
+    $watchResult = Watch-RehearsalDeployment -VmName $VmName -Credential $Credential -Deadline $overallDeadline -VolumeLabel $VolumeLabel -FailureInjection $FailureInjection -MediaVhdxPath $MediaVhdxPath
     $harvestedFolder = Copy-RehearsalArtifacts -VmName $VmName -Credential $Credential -ArtifactFolder $artifactFolder -VolumeLabel $VolumeLabel -IsHandoverScenario $IsHandoverScenario -HandoverLocalPath $HandoverLocalPath
 
     return [ordered]@{
