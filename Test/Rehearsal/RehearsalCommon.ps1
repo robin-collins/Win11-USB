@@ -34,6 +34,21 @@ param()
 
 Set-StrictMode -Version 2.0
 
+# Explicitly import the Hyper-V module up front (best-effort) so this file's Hyper-V cmdlet
+# calls (Get-VM, New-VM, Get-VMSwitch, ...) always resolve to Hyper-V's own implementations,
+# never to a same-named cmdlet from an unrelated module a bench technician might also have
+# installed (e.g. VMware PowerCLI also exports Get-VM/New-VM). PowerShell's module autoloading
+# picks whichever matching module it finds first on $env:PSModulePath, which is not guaranteed
+# to be Hyper-V's. Failure here is not fatal: Test-RehearsalPrerequisites and
+# Assert-HyperVAvailable already degrade every downstream check/function to a clear failure
+# result when Hyper-V's cmdlets are unavailable (including on this toolkit's own non-Windows
+# dev/CI sandbox).
+try {
+    Import-Module -Name 'Hyper-V' -ErrorAction Stop | Out-Null
+} catch {
+    Write-Verbose "RehearsalCommon.ps1: could not import the Hyper-V module (expected on a non-Hyper-V host): $($_.Exception.Message)"
+}
+
 # Hyper-V's built-in external switch, present on any host where the Hyper-V feature has been
 # enabled with default settings. T11 attaches rehearsal VMs to this switch.
 $script:RehearsalDefaultSwitchName = 'Default Switch'
@@ -110,24 +125,46 @@ function Test-RehearsalElevation {
 function Test-RehearsalHyperVFeature {
     <#
         .SYNOPSIS
-            Checks that the Hyper-V Windows optional feature is enabled.
+            Checks that the Hyper-V Windows optional feature is enabled and its PowerShell
+            cmdlets are functional.
+
+        .DESCRIPTION
+            Get-WindowsOptionalFeature is the most direct way to answer "is the feature
+            enabled", but its underlying DISM/COM interop is unreliable under PowerShell 7 on
+            some builds -- it can throw "Class not registered" even when Hyper-V is genuinely
+            enabled and fully functional (observed on a machine where Windows PowerShell 5.1
+            reports the feature Enabled while pwsh's Get-WindowsOptionalFeature throws on the
+            identical host). Treat it as a best-effort signal only, and fall back to a
+            functional check (Get-VMHost, after the module-import guard above) rather than
+            failing the whole prerequisite gate on a runtime quirk unrelated to whether
+            Hyper-V actually works.
     #>
     [CmdletBinding()]
     param()
 
-    if (-not (Test-RehearsalCommandAvailable -Name 'Get-WindowsOptionalFeature')) {
-        return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Fail' -Message 'Get-WindowsOptionalFeature is not available on this platform. The rehearsal harness requires Windows 10/11 Pro, Enterprise, or Education with the Hyper-V feature.'
+    if (Test-RehearsalCommandAvailable -Name 'Get-WindowsOptionalFeature') {
+        try {
+            $feature = Get-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-All' -ErrorAction Stop
+            if ($feature -and $feature.State -eq 'Enabled') {
+                return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Pass' -Message 'Hyper-V Windows feature is enabled.' -Data @{ state = [string]$feature.State }
+            }
+            if ($feature) {
+                return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Fail' -Message "Hyper-V Windows feature is not enabled (state: $($feature.State)). Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All, then reboot." -Data @{ state = [string]$feature.State }
+            }
+        } catch {
+            Write-Verbose "Test-RehearsalHyperVFeature: Get-WindowsOptionalFeature failed (falling back to a functional check): $($_.Exception.Message)"
+        }
+    }
+
+    if (-not (Test-RehearsalCommandAvailable -Name 'Get-VMHost')) {
+        return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Fail' -Message 'Neither Get-WindowsOptionalFeature nor Get-VMHost is available on this platform. The rehearsal harness requires Windows 10/11 Pro, Enterprise, or Education with the Hyper-V feature.'
     }
 
     try {
-        $feature = Get-WindowsOptionalFeature -Online -FeatureName 'Microsoft-Hyper-V-All' -ErrorAction Stop
-        if ($feature -and $feature.State -eq 'Enabled') {
-            return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Pass' -Message 'Hyper-V Windows feature is enabled.' -Data @{ state = [string]$feature.State }
-        }
-        $state = if ($feature) { [string]$feature.State } else { 'Unknown' }
-        return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Fail' -Message "Hyper-V Windows feature is not enabled (state: $state). Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All, then reboot." -Data @{ state = $state }
+        $vmHost = Get-VMHost -ErrorAction Stop
+        return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Pass' -Message "Hyper-V is enabled and functional (Get-VMHost responded from '$($vmHost.Name)')." -Data @{ state = 'Enabled'; source = 'Get-VMHost' }
     } catch {
-        return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Fail' -Message "Could not query the Hyper-V Windows feature: $($_.Exception.Message)"
+        return New-RehearsalCheckResult -Check 'Hyper-V Feature' -Status 'Fail' -Message "Hyper-V does not appear to be enabled or its PowerShell module is not usable: $($_.Exception.Message). Enable it with: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All, then reboot."
     }
 }
 
@@ -619,6 +656,61 @@ function New-RehearsalVm {
         OsDiskPath    = $paths.OsDiskPath
         MediaVhdxPath = (Resolve-Path -LiteralPath $MediaVhdxPath).Path
         IsoPath       = (Resolve-Path -LiteralPath $IsoPath).Path
+    }
+}
+
+function Send-RehearsalKeystroke {
+    <#
+        .SYNOPSIS
+            Sends literal text to a running VM's synthetic keyboard via Hyper-V's WMI keyboard
+            device (Msvm_Keyboard).
+
+        .DESCRIPTION
+            A Gen-2 VM booting Windows Setup media (New-RehearsalVm's DVD-then-OS-disk boot
+            order) shows a "Press any key to boot from CD or DVD..." prompt -- the ISO's El
+            Torito/cdboot.efi loader deliberately waiting for input to distinguish an intentional
+            DVD boot from leftover media -- and will sit there indefinitely with no human at the
+            console. This types a keystroke through the VM's virtual keyboard so a rehearsal
+            proceeds fully unattended; Windows Setup's own answer file (Autounattend.xml) takes
+            over from there. Wait-RehearsalSetupExit (RehearsalMonitoring.ps1, T12) calls this
+            repeatedly during the first part of its Phase 1 poll loop, since the exact moment
+            the prompt appears cannot be predicted from the host side.
+
+            Never throws: a VM that has no keyboard device yet (e.g. still initialising firmware)
+            degrades to returning $false so callers can simply retry on the next poll.
+
+        .PARAMETER VmName
+            Name of the running VM to send the keystroke to.
+
+        .PARAMETER Text
+            Literal text to type. Defaults to a single space -- the setup boot prompt accepts
+            any key.
+
+        .OUTPUTS
+            [bool] whether Hyper-V reported the keystroke as delivered.
+
+        .NOTES
+            UNVERIFIED ON REAL HYPER-V until exercised on a bench host: confirmed manually while
+            rehearsing this harness for the first time (a running VM's boot-from-DVD prompt was
+            dismissed this same way via an ad hoc script before this helper existed).
+    #>
+    [OutputType([bool])]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [string]$Text = ' '
+    )
+
+    try {
+        $vm = Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName 'Msvm_ComputerSystem' -Filter "ElementName='$VmName'" -ErrorAction Stop
+        if (-not $vm) { return $false }
+        $keyboard = Get-CimAssociatedInstance -InputObject $vm -ResultClassName 'Msvm_Keyboard' -ErrorAction Stop
+        if (-not $keyboard) { return $false }
+        $result = Invoke-CimMethod -InputObject $keyboard -MethodName 'TypeText' -Arguments @{ AsciiText = $Text } -ErrorAction Stop
+        return ([int]$result.ReturnValue -eq 0)
+    } catch {
+        Write-Verbose "Send-RehearsalKeystroke: could not send a keystroke to VM '$VmName' (it may not have a keyboard device available yet): $($_.Exception.Message)"
+        return $false
     }
 }
 

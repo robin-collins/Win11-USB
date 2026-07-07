@@ -76,17 +76,6 @@ function):
 Invoke-Pester -Path Tests/Unit -FullNameFilter '*Get-SafeName*' -Output Detailed
 ```
 
-### A note on `New-RandomPassword`
-
-`New-RandomPassword` calls `[System.Web.Security.Membership]::GeneratePassword`,
-a full .NET Framework API. It works everywhere the toolkit actually runs in
-production (Windows PowerShell 5.1) and is expected to work under PowerShell 7
-on Windows too. On PowerShell 7 on Linux/macOS, .NET's trimmed-down
-`System.Web` compatibility shim does not implement `Membership`, so those
-specific test cases detect that at runtime and report `Skipped` (with a reason)
-rather than `Failed` — this is expected on non-Windows dev machines and CI
-runners, not a bug in the test suite.
-
 ## Expected result
 
 A clean run reports zero failures, for example:

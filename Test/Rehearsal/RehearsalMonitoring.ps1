@@ -194,6 +194,12 @@ function Wait-RehearsalSetupExit {
             Setup", the 0x80004005-class failure), captures a screenshot for diagnosis if
             -ScreenshotPath is supplied.
 
+            Also dismisses the Gen-2 boot-from-DVD prompt: New-RehearsalVm's DVD-then-OS-disk
+            boot order means Windows Setup's own loader shows "Press any key to boot from CD or
+            DVD..." and waits forever with no human at the console. This is not predictable from
+            the host side, so for the first -DismissBootPromptSeconds of this phase, every poll
+            iteration also calls Send-RehearsalKeystroke (RehearsalCommon.ps1) once.
+
         .PARAMETER VmName
             Name of the rehearsal VM to watch. Must already exist and be running.
 
@@ -206,12 +212,20 @@ function Wait-RehearsalSetupExit {
         .PARAMETER ScreenshotPath
             Optional path to save a diagnostic screenshot to if this phase times out.
 
+        .PARAMETER DismissBootPromptSeconds
+            How long after this phase starts to keep sending a dismissal keystroke for the
+            "Press any key to boot from CD or DVD..." prompt. Default 90 seconds -- comfortably
+            longer than a Gen-2 VM's firmware/DVD-loader startup, short enough to stop well
+            before Windows Setup's own unattended UI could plausibly be showing anything a
+            stray keystroke should not be sent to.
+
         .NOTES
             UNVERIFIED ON REAL HYPER-V: the exact Uptime-reset and Heartbeat-status-string
             behaviour during a real Windows Setup wipe/install/OOBE sequence needs confirming
             on a bench host; the status strings checked below ('OK' and the "Applications
             Healthy" variant) are Hyper-V's documented Heartbeat states, not observed first-hand
-            in this sandbox.
+            in this sandbox. The boot-prompt dismissal itself (Send-RehearsalKeystroke) was
+            confirmed manually during that same first rehearsal, before this wiring existed.
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -219,18 +233,24 @@ function Wait-RehearsalSetupExit {
         [Parameter(Mandatory = $true)][string]$VmName,
         [int]$TimeoutMinutes = 40,
         [int]$PollSeconds = 15,
-        [string]$ScreenshotPath
+        [string]$ScreenshotPath,
+        [int]$DismissBootPromptSeconds = 90
     )
 
     Assert-HyperVAvailable
 
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $bootPromptDeadline = (Get-Date).AddSeconds($DismissBootPromptSeconds)
     $sawReboot = $false
     $lastUptime = $null
 
     while ((Get-Date) -lt $deadline) {
         $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
         if (-not $vm) { throw "Wait-RehearsalSetupExit: no VM named '$VmName' exists." }
+
+        if ((Get-Date) -lt $bootPromptDeadline) {
+            Send-RehearsalKeystroke -VmName $VmName -Text ' ' | Out-Null
+        }
 
         if ($null -ne $lastUptime -and $vm.Uptime -lt $lastUptime) { $sawReboot = $true }
         $lastUptime = $vm.Uptime

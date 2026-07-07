@@ -1,0 +1,196 @@
+
+=== OSIT Windows 11 Deployment Rehearsal ===
+Scenario:          Standard
+VM name:           Rehearsal-Standard-20260707-140610
+ISO path:          E:\iso\Win11_25H2_English_x64_all_versions.iso
+Working directory: C:\Users\tech\AppData\Local\Temp\DeploymentRehearsal
+Memory / CPU:      8 GB / 4 vCPU
+OS disk:           80 GB
+Timeout:           180 minutes
+KeepVm:            True
+SkipAssertions:    False
+
+Checking prerequisites...
+[Pass] Elevation - PowerShell session is running elevated (Administrator).
+[Pass] Hyper-V Feature - Hyper-V is enabled and functional (Get-VMHost responded from 'MAXPOWER').
+[Pass] ISO Media - ISO file exists, has a .iso extension, and is 7.2 GB.
+[Pass] Working Directory - Working directory is available: C:\Users\tech\AppData\Local\Temp\DeploymentRehearsal
+[Pass] Disk Space - 827.8 GB free on C:\; at least 100 GB required.
+[Pass] Default Switch - Hyper-V virtual switch 'Default Switch' exists.
+[Pass] VM Name - No existing VM named 'Rehearsal-Standard-20260707-140610'.
+
+All prerequisites passed.
+
+Resolved rehearsal plan:
+
+Name             Value
+----             -----
+Scenario         Standard
+VmName           Rehearsal-Standard-20260707-140610
+IsoPath          E:\iso\Win11_25H2_English_x64_all_versions.iso
+WorkingDirectory C:\Users\tech\AppData\Local\Temp\DeploymentRehearsal
+MemoryGB         8
+CpuCount         4
+OsDiskGB         80
+TimeoutMinutes   180
+KeepVm           True
+SkipAssertions   False
+
+
+Building rehearsal media (T10)...
+Deployment folder structure ensured under F:\
+Deployment files refreshed at F:\Deployment (45 files overwritten or copied; 6 runtime items skipped).
+Deployment state is already clear at F:\Deployment\State
+
+Destructive partitioning is ENABLED for disk 0.
+USB-root OSIT-DiskPart.txt will clean disk 0 and create EFI 512 MB, MSR 16 MB, Windows, and WinRE 2048 MB partitions.
+Autounattend.xml prepared for OSIT and written to F:\Autounattend.xml
+DiskPart wipe script written to F:\OSIT-DiskPart.txt
+
+Validating the generated USB Autounattend.xml...
+Validating: F:\Autounattend.xml
+Mode: Generated
+[Pass] Generated placeholders - No toolkit placeholders found.
+[Pass] XML well-formed - XML parsed successfully after template placeholder normalization.
+[Pass] Root element - Root element is unattend with the expected namespace.
+[Pass] OSIT local account - Expected value 'OSIT' found.
+[Pass] OSIT AutoLogon - Expected value 'OSIT' found.
+[Pass] OSIT password consistency - Local account and AutoLogon password values match.
+[Pass] BypassNRO - BypassNRO registry command is present.
+[Pass] FirstLogon deployment command - FirstLogon command locates the USB label and starts Start-Deployment.ps1.
+[Pass] windowsPE pass - windowsPE pass is present.
+[Pass] Windows install disk - Expected value '0' found.
+[Pass] Windows install partition - Expected value '3' found.
+[Pass] windowsPE command length - RunSynchronous command is 170 characters (limit 259).
+[Pass] DiskPart script reference - RunSynchronous command locates USB-root OSIT-DiskPart.txt and runs diskpart /s against it.
+[Pass] DiskPart script file - Companion diskpart script found: F:\OSIT-DiskPart.txt
+[Pass] Partition command: select disk 0 - Expected partition command fragment found.
+[Pass] Partition command: clean - Expected partition command fragment found.
+[Pass] Partition command: convert gpt - Expected partition command fragment found.
+[Pass] Partition command: create partition efi size=512 - Expected partition command fragment found.
+[Pass] Partition command: create partition msr size=16 - Expected partition command fragment found.
+[Pass] Partition command: shrink desired=2048 minimum=2048 - Expected partition command fragment found.
+[Pass] Partition command: set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac - Expected partition command fragment found.
+[Pass] Partition command: gpt attributes=0x8000000000000001 - Expected partition command fragment found.
+[Pass] DiskPart drive letters - Script avoids assigning drive letter C during WinPE.
+[Pass] Partition command quoting - DiskPart script avoids unnecessary quoted values.
+[Warn] ADK schema validation - Schema DLL not found. Install Windows ADK or pass -DllPath for full schema validation.
+
+Validation complete: 24 pass, 1 warning, 0 skipped, 0 failure
+
+REMINDER: this USB will WIPE disk 0 automatically when a machine boots from it.
+OSIT_WIFI_PASSWORD written to USB-root .env for MSP WiFi setup: F:\.env
+USB deployment toolkit initialisation complete.
+
+Destructive partitioning is ENABLED for disk 0.
+USB-root OSIT-DiskPart.txt will clean disk 0 and create EFI 512 MB, MSR 16 MB, Windows, and WinRE 2048 MB partitions.
+Validating: F:\Autounattend.xml
+Mode: Generated
+[Pass] Generated placeholders - No toolkit placeholders found.
+[Pass] XML well-formed - XML parsed successfully after template placeholder normalization.
+[Pass] Root element - Root element is unattend with the expected namespace.
+[Pass] OSIT local account - Expected value 'OSIT' found.
+[Pass] OSIT AutoLogon - Expected value 'OSIT' found.
+[Pass] OSIT password consistency - Local account and AutoLogon password values match.
+[Pass] BypassNRO - BypassNRO registry command is present.
+[Pass] FirstLogon deployment command - FirstLogon command locates the USB label and starts Start-Deployment.ps1.
+[Pass] windowsPE pass - windowsPE pass is present.
+[Pass] Windows install disk - Expected value '0' found.
+[Pass] Windows install partition - Expected value '3' found.
+[Pass] windowsPE command length - RunSynchronous command is 170 characters (limit 259).
+[Pass] DiskPart script reference - RunSynchronous command locates USB-root OSIT-DiskPart.txt and runs diskpart /s against it.
+[Pass] DiskPart script file - Companion diskpart script found: F:\OSIT-DiskPart.txt
+[Pass] Partition command: select disk 0 - Expected partition command fragment found.
+[Pass] Partition command: clean - Expected partition command fragment found.
+[Pass] Partition command: convert gpt - Expected partition command fragment found.
+[Pass] Partition command: create partition efi size=512 - Expected partition command fragment found.
+[Pass] Partition command: create partition msr size=16 - Expected partition command fragment found.
+[Pass] Partition command: shrink desired=2048 minimum=2048 - Expected partition command fragment found.
+[Pass] Partition command: set id=de94bba4-06d1-4d40-a16a-bfd50179d6ac - Expected partition command fragment found.
+[Pass] Partition command: gpt attributes=0x8000000000000001 - Expected partition command fragment found.
+[Pass] DiskPart drive letters - Script avoids assigning drive letter C during WinPE.
+[Pass] Partition command quoting - DiskPart script avoids unnecessary quoted values.
+[Warn] ADK schema validation - Schema DLL not found. Install Windows ADK or pass -DllPath for full schema validation.
+
+Validation complete: 24 pass, 1 warning, 0 skipped, 0 failure
+Rehearsal media built: C:\Users\tech\AppData\Local\Temp\DeploymentRehearsal\Rehearsal-Media-Standard-20260707-140823-f967a3.vhdx
+Creating rehearsal VM (T11)...
+Rehearsal VM created: Rehearsal-Standard-20260707-140610
+Taking 'pre-boot' checkpoint...
+Starting the VM...
+Monitoring the rehearsal (T12: Setup/WinPE, then guest deployment progress)...
+[33;1mWARNING: Wait-RehearsalSetupExit: VM 'Rehearsal-Standard-20260707-140610' did not leave Setup/WinPE within 40 minute(s) (the 0x80004005-class failure FABLE_TASKS.md T12 calls out).[0m
+[Rehearsal] Saved a timeout diagnostic screenshot to C:\projects\Win11-USB\Test\Rehearsal\Artifacts\20260707-140845\setup-timeout-screenshot.png
+[33;1mWARNING: Copy-RehearsalArtifacts: could not establish a PowerShell Direct session to harvest guest artifacts: An error has occurred which PowerShell cannot handle. A remote session might have ended.[0m
+[33;1mWARNING: Could not capture the final screenshot: Save-RehearsalVmScreenshot: GetVirtualSystemThumbnailImage failed (ReturnValue=32775) for VM 'Rehearsal-Standard-20260707-140610'. The VM may not yet have a rendered console frame (very early boot).[0m
+
+Rehearsal monitoring result: Timeout (phase: Setup)
+Artifacts harvested to: C:\projects\Win11-USB\Test\Rehearsal\Artifacts\20260707-140845
+
+Running post-run assertion suite (T13)...
+
+[Fail] Guest deployment status snapshot is reachable - PowerShell Direct could not reach VM 'Rehearsal-Standard-20260707-140610': An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Deployment state shows 'Complete' - No guest status snapshot available.
+[Fail] Every deployment step is completed - No guest status snapshot available.
+[Fail] last_error is empty - No guest status snapshot available.
+[Fail] No Panther/sysprep unattend files remain in-guest - Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Winlogon value 'DefaultPassword' is absent - Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Winlogon value 'AutoAdminLogon' is absent - Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Winlogon value 'AutoLogonCount' is absent - Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Resume scheduled task is unregistered - Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Local handover .env is scrubbed (FABLE_ENHANCE.md P0) - Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] MSP WLAN profile is scrubbed (FABLE_ENHANCE.md P0) - Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Computer name matches computer_name_mode - Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] OSIT account 'OSIT' exists and is enabled - Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] OSIT account 'OSIT' is in Administrators - Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] No unexpected extra local users - Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] powercfg Display timeout matches config - Could not gather in-guest power facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] powercfg Sleep/standby timeout matches config - Could not gather in-guest power facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] powercfg Hibernate timeout matches config - Could not gather in-guest power facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] winget package '7zip.7zip' is installed - Could not gather in-guest winget facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] Deployment JSON report exists and parses - No deployment-report-*.json found under the harvested artifact folder.
+[Fail] Deployment Markdown summary exists - No deployment-summary-*.md found under the harvested artifact folder.
+[Fail] Asset inventory JSON exists and parses - No asset-inventory-*.json found under the harvested artifact folder.
+[Fail] Deployment report's dry_run flag is absent or false - Cannot check dry_run: deployment-report-*.json was not found or did not parse.
+[Fail] Disk 0 has exactly 4 partitions (ESP/MSR/OS/WinRE) - Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] EFI partition (partition 1) size is within tolerance - Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] MSR partition (partition 2) size is within tolerance - Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] WinRE partition (partition 4) size is within tolerance - Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] OS partition (partition 3) exists - Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] WinRE partition type GUID is correct - Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+[Fail] WinRE partition GPT attributes are correct - Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+
+Assertion report written to: C:\projects\Win11-USB\Test\Rehearsal\Artifacts\20260707-140845\rehearsal-report-20260707-144915.md
+Assertions: 0/30 passed
+Rehearsal FAILED: one or more post-run assertions did not pass.
+ - Guest deployment status snapshot is reachable: PowerShell Direct could not reach VM 'Rehearsal-Standard-20260707-140610': An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Deployment state shows 'Complete': No guest status snapshot available.
+ - Every deployment step is completed: No guest status snapshot available.
+ - last_error is empty: No guest status snapshot available.
+ - No Panther/sysprep unattend files remain in-guest: Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Winlogon value 'DefaultPassword' is absent: Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Winlogon value 'AutoAdminLogon' is absent: Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Winlogon value 'AutoLogonCount' is absent: Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Resume scheduled task is unregistered: Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Local handover .env is scrubbed (FABLE_ENHANCE.md P0): Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - MSP WLAN profile is scrubbed (FABLE_ENHANCE.md P0): Could not gather in-guest scrub facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Computer name matches computer_name_mode: Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - OSIT account 'OSIT' exists and is enabled: Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - OSIT account 'OSIT' is in Administrators: Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - No unexpected extra local users: Could not gather in-guest identity facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - powercfg Display timeout matches config: Could not gather in-guest power facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - powercfg Sleep/standby timeout matches config: Could not gather in-guest power facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - powercfg Hibernate timeout matches config: Could not gather in-guest power facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - winget package '7zip.7zip' is installed: Could not gather in-guest winget facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - Deployment JSON report exists and parses: No deployment-report-*.json found under the harvested artifact folder.
+ - Deployment Markdown summary exists: No deployment-summary-*.md found under the harvested artifact folder.
+ - Asset inventory JSON exists and parses: No asset-inventory-*.json found under the harvested artifact folder.
+ - Deployment report's dry_run flag is absent or false: Cannot check dry_run: deployment-report-*.json was not found or did not parse.
+ - Disk 0 has exactly 4 partitions (ESP/MSR/OS/WinRE): Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - EFI partition (partition 1) size is within tolerance: Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - MSR partition (partition 2) size is within tolerance: Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - WinRE partition (partition 4) size is within tolerance: Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - OS partition (partition 3) exists: Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - WinRE partition type GUID is correct: Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+ - WinRE partition GPT attributes are correct: Could not gather in-guest disk facts: An error has occurred which PowerShell cannot handle. A remote session might have ended.
+KeepVm was specified: leaving the VM and its disks in place for inspection.

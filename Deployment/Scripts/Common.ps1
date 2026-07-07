@@ -1318,11 +1318,66 @@ function Get-SafeComputerName {
 }
 
 function New-RandomPassword {
+    <#
+        .SYNOPSIS
+            Generates a cryptographically random password with at least one uppercase letter,
+            one lowercase letter, one digit, and one symbol.
+
+        .DESCRIPTION
+            Built on System.Security.Cryptography.RandomNumberGenerator only, which is present
+            in both Windows PowerShell 5.1 (.NET Framework) and PowerShell 7 (.NET Core) on any
+            platform. The previous implementation called
+            [System.Web.Security.Membership]::GeneratePassword, a full-.NET-Framework-only API:
+            it is unavailable under PowerShell 7's trimmed-down System.Web compatibility shim
+            even on Windows (confirmed while rehearsing the Hyper-V harness's media builder
+            under pwsh 7 on a Windows host: "Unable to find type
+            [System.Web.Security.Membership]"), not only on Linux/macOS as previously assumed.
+    #>
     [CmdletBinding()]
+    [OutputType([string])]
     param([int]$Length = 20)
 
-    Add-Type -AssemblyName System.Web
-    return [System.Web.Security.Membership]::GeneratePassword($Length, 4)
+    $charClasses = @(
+        'ABCDEFGHJKLMNPQRSTUVWXYZ',
+        'abcdefghijkmnopqrstuvwxyz',
+        '23456789',
+        '!@#$%^&*-_=+'
+    )
+
+    if ($Length -lt $charClasses.Count) {
+        throw "New-RandomPassword: -Length must be at least $($charClasses.Count) to fit one character from each required class (got $Length)."
+    }
+
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $randomIndex = {
+            param([int]$Max)
+            $buffer = [byte[]]::new(4)
+            $rng.GetBytes($buffer)
+            return [BitConverter]::ToUInt32($buffer, 0) % $Max
+        }
+
+        $passwordChars = New-Object System.Collections.Generic.List[char]
+        foreach ($class in $charClasses) {
+            $passwordChars.Add($class[(& $randomIndex $class.Length)])
+        }
+
+        $allChars = -join $charClasses
+        while ($passwordChars.Count -lt $Length) {
+            $passwordChars.Add($allChars[(& $randomIndex $allChars.Length)])
+        }
+
+        for ($i = $passwordChars.Count - 1; $i -gt 0; $i--) {
+            $j = & $randomIndex ($i + 1)
+            $tmp = $passwordChars[$i]
+            $passwordChars[$i] = $passwordChars[$j]
+            $passwordChars[$j] = $tmp
+        }
+
+        return -join $passwordChars
+    } finally {
+        $rng.Dispose()
+    }
 }
 
 function ConvertFrom-SecureStringToPlainText {

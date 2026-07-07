@@ -47,3 +47,5 @@ Test/Rehearsal/Artifacts/*
 Test/Rehearsal/.working/
 Test/Rehearsal/**/.env
 Test/Rehearsal/**/*.env
+
+*.vhd

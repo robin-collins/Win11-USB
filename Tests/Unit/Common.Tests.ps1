@@ -17,31 +17,6 @@
 # be executed with pwsh 7 on Linux, it must not rely on anything that would
 # break on 5.1.
 
-# New-RandomPassword calls [System.Web.Security.Membership]::GeneratePassword, a full .NET
-# Framework-only API. Windows PowerShell 5.1 (the toolkit's actual production runtime) always
-# has this available, and it is expected to work under Windows pwsh 7 as well. PowerShell 7 on
-# Linux (this dev/CI box) uses .NET's trimmed-down System.Web compatibility shim, which does not
-# implement Membership.GeneratePassword at all.
-#
-# This capability probe is a plain function, deliberately called fresh wherever it's needed
-# rather than cached once into a $script: variable, because Pester v5 runs Discovery and Run as
-# two separate passes with their own session state: a $script: variable set by loose
-# (Describe-external) code or a BeforeAll body during Discovery does not reliably survive into
-# the Run-phase session that later executes each It block's body (confirmed: an It body reading
-# a Discovery-set $script: variable throws "cannot be retrieved because it has not been set").
-# -Skip parameters, by contrast, ARE evaluated during Discovery, so calling this function
-# directly in each -Skip: expression below is both correct and simplest -- no BeforeAll/$script:
-# hazard either way.
-function Test-CanGenerateRandomPassword {
-    try {
-        Add-Type -AssemblyName System.Web -ErrorAction Stop
-        [System.Web.Security.Membership].GetMethod('GeneratePassword', [type[]]@([int], [int])) | Out-Null
-        return $true
-    } catch {
-        return $false
-    }
-}
-
 BeforeAll {
     # Common.ps1 only sets script-scoped variables and defines functions at
     # dot-source time -- it has no side effects when loaded -- so it is safe
@@ -438,30 +413,22 @@ Describe 'ConvertTo-ProcessArgumentString' {
 }
 
 Describe 'New-RandomPassword' {
-    It 'generates a password of the default length (20)' -Skip:(-not (Test-CanGenerateRandomPassword)) {
+    It 'generates a password of the default length (20)' {
         (New-RandomPassword).Length | Should -Be 20
     }
 
-    It 'generates a password of a caller-supplied custom length' -Skip:(-not (Test-CanGenerateRandomPassword)) {
+    It 'generates a password of a caller-supplied custom length' {
         (New-RandomPassword -Length 32).Length | Should -Be 32
     }
 
-    It 'generates different values across successive calls' -Skip:(-not (Test-CanGenerateRandomPassword)) {
+    It 'generates different values across successive calls' {
         $first = New-RandomPassword -Length 24
         $second = New-RandomPassword -Length 24
         $first | Should -Not -Be $second
     }
 
-    It 'adversarial: throws for a length too small to fit the fixed 4 non-alphanumeric characters requested' -Skip:(-not (Test-CanGenerateRandomPassword)) {
+    It 'adversarial: throws for a length too small to fit one character from each required class' {
         { New-RandomPassword -Length 2 } | Should -Throw
-    }
-
-    It 'records why the cases above are (not) skipped on this platform, so the gap is visible instead of silent' {
-        if (Test-CanGenerateRandomPassword) {
-            Set-ItResult -Skipped -Because 'System.Web.Security.Membership is available here, so the cases above ran for real'
-        } else {
-            Set-ItResult -Skipped -Because 'System.Web.Security.Membership is unavailable on this platform (expected on pwsh 7/Linux); the cases above were skipped rather than failed'
-        }
     }
 }
 
