@@ -1001,8 +1001,31 @@ function Assert-RehearsalScenarioKnown {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Scenario)
 
+    Resolve-RehearsalScenarioFolderName -Scenario $Scenario | Out-Null
+}
+
+function Resolve-RehearsalScenarioFolderName {
+    <#
+        .SYNOPSIS
+            Resolves -Scenario to its exact on-disk casing (FABLE_TASKS.md T14), throwing the
+            same 'not recognised' error Assert-RehearsalScenarioKnown does if it matches nothing.
+
+        .DESCRIPTION
+            -Scenario is accepted case-insensitively everywhere in this file, but
+            Test\Rehearsal\Scenarios\<name>\ folder names must be matched with their real
+            casing before being used in a path: Windows filesystems are case-insensitive so a
+            mismatched case silently worked there, but this toolkit's CI also runs on Linux,
+            where 'nowipe' and 'NoWipe' are different paths and Get-Content would throw
+            "file not found" instead of loading the real overlay. Every function below that
+            builds a scenario path calls this first instead of using -Scenario directly.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)][string]$Scenario)
+
     $known = Get-RehearsalKnownScenarioNames
-    if (@($known) -icontains $Scenario) { return }
+    $match = @($known | Where-Object { $_ -ieq $Scenario } | Select-Object -First 1)
+    if ($match.Count -gt 0) { return [string]$match[0] }
 
     throw "Rehearsal scenario '$Scenario' is not recognised. Known scenarios: $($known -join ', ') (add a new one under Test\Rehearsal\Scenarios\<name>\deployment_config.overlay.json; see FABLE_TASKS.md T14)."
 }
@@ -1028,13 +1051,13 @@ function Resolve-RehearsalScenarioOverlay {
     [OutputType([hashtable])]
     param([Parameter(Mandatory = $true)][string]$Scenario)
 
-    Assert-RehearsalScenarioKnown -Scenario $Scenario
+    $folderName = Resolve-RehearsalScenarioFolderName -Scenario $Scenario
 
-    if ($Scenario -ieq 'Standard') {
+    if ($folderName -ieq 'Standard') {
         return Get-RehearsalStandardScenarioOverlay
     }
 
-    $overlayPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $Scenario) 'deployment_config.overlay.json'
+    $overlayPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $folderName) 'deployment_config.overlay.json'
     if (-not (Test-Path -LiteralPath $overlayPath -PathType Leaf)) {
         throw "Rehearsal scenario '$Scenario' has no deployment_config.overlay.json at $overlayPath."
     }
@@ -1057,8 +1080,10 @@ function Get-RehearsalScenarioWingetPackages {
     [OutputType([System.Object[]])]
     param([Parameter(Mandatory = $true)][string]$Scenario)
 
-    if ($Scenario -ine 'Standard') {
-        $overlayPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $Scenario) 'winget_packages.overlay.json'
+    $folderName = Resolve-RehearsalScenarioFolderName -Scenario $Scenario
+
+    if ($folderName -ine 'Standard') {
+        $overlayPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $folderName) 'winget_packages.overlay.json'
         if (Test-Path -LiteralPath $overlayPath -PathType Leaf) {
             $raw = Get-Content -LiteralPath $overlayPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             return @(ConvertTo-PlainHashtable $raw.packages)
@@ -1085,9 +1110,10 @@ function Get-RehearsalScenarioFailureInjection {
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param([Parameter(Mandatory = $true)][string]$Scenario)
 
-    if ($Scenario -ieq 'Standard') { return $null }
+    $folderName = Resolve-RehearsalScenarioFolderName -Scenario $Scenario
+    if ($folderName -ieq 'Standard') { return $null }
 
-    $scenarioJsonPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $Scenario) 'scenario.json'
+    $scenarioJsonPath = Join-Path (Join-Path (Get-RehearsalScenariosRoot) $folderName) 'scenario.json'
     if (-not (Test-Path -LiteralPath $scenarioJsonPath -PathType Leaf)) { return $null }
 
     $raw = Get-Content -LiteralPath $scenarioJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop

@@ -66,6 +66,22 @@ BeforeAll {
     # so both are mocked to a deterministic "nothing found" result on every platform.
     Mock Get-ItemProperty { $null }
     Mock Invoke-ExternalCommand { @{ exit_code = 1; stdout = ''; stderr = '' } }
+
+    # New-DeploymentState (called in each It's BeforeEach below) calls Get-DeviceIdentity
+    # internally, which is Windows-only (Get-CimInstance); mocked the same way
+    # Common.Tests.ps1/DryRun.Tests.ps1/StartDeploymentDryRun.Tests.ps1 already do.
+    Mock Get-DeviceIdentity {
+        @{
+            serial_number   = 'TEST-SERIAL-COMPLETE'
+            uuid            = '33333333-3333-3333-3333-333333333333'
+            computer_name   = 'COMPLETEPC'
+            manufacturer    = 'Dell'
+            model           = 'Latitude'
+            windows_caption = 'Windows 11 Pro'
+            windows_version = '10.0.22621'
+            windows_build   = '22621'
+        }
+    }
 }
 
 Describe 'Invoke-DeploymentStep -Step Complete, dry-run scrub preview (T07c)' {
