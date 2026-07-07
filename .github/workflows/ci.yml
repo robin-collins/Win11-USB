@@ -65,15 +65,41 @@ jobs:
 
       # Windows PowerShell 5.1 ships Pester 3.4.4 by default; -MinimumVersion 5.0.0 forces a
       # real Pester 5.x install rather than silently reusing the stale in-box module.
-      - name: Install Pester
-        shell: ${{ matrix.shell }}
+      #
+      # GitHub Actions rejects `shell: ${{ matrix.shell }}` at workflow-validation time (the
+      # `matrix` context is not resolvable in the step-level `shell:` key, unlike `if:`/`run:`),
+      # so each matrix leg's shell is instead selected via a literal `shell:` value on an
+      # `if:`-gated step pair rather than interpolated directly into `shell:`.
+      - name: Install Pester (pwsh)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
         run: |
           Install-Module -Name Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force -Scope CurrentUser -SkipPublisherCheck
           Import-Module Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force
           Get-Module -ListAvailable Pester | Select-Object Name, Version | Format-Table -AutoSize
 
-      - name: Run Pester unit tests
-        shell: ${{ matrix.shell }}
+      - name: Install Pester (powershell)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          Install-Module -Name Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force
+          Get-Module -ListAvailable Pester | Select-Object Name, Version | Format-Table -AutoSize
+
+      - name: Run Pester unit tests (pwsh)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force
+          $result = Invoke-Pester -Path Tests/Unit -Output Detailed -CI -PassThru
+          if ($result.FailedCount -gt 0) {
+            Write-Output "Pester reported $($result.FailedCount) failed test(s) out of $($result.TotalCount)."
+            exit 1
+          }
+
+      - name: Run Pester unit tests (powershell)
+        if: matrix.shell == 'powershell'
+        shell: powershell
         run: |
           Import-Module Pester -MinimumVersion $env:PESTER_MIN_VERSION -Force
           $result = Invoke-Pester -Path Tests/Unit -Output Detailed -CI -PassThru

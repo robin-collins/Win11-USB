@@ -117,7 +117,12 @@ function ConvertTo-PlainHashtable {
             foreach ($item in $InputObject) {
                 $items += ,(ConvertTo-PlainHashtable $item)
             }
-            return $items
+            # PowerShell enumerates an array written to the output stream element by element; an
+            # empty array therefore emits zero pipeline objects and collapses to $null at the
+            # call site (e.g. `$hash[$key] = ConvertTo-PlainHashtable $emptyArray` would silently
+            # store $null instead of @()). The unary comma forces the array itself to be emitted
+            # as a single object, preserving `[]` as `@()` however many elements it has.
+            return , $items
         }
         return $InputObject
     }

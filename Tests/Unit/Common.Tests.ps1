@@ -17,6 +17,31 @@
 # be executed with pwsh 7 on Linux, it must not rely on anything that would
 # break on 5.1.
 
+# New-RandomPassword calls [System.Web.Security.Membership]::GeneratePassword, a full .NET
+# Framework-only API. Windows PowerShell 5.1 (the toolkit's actual production runtime) always
+# has this available, and it is expected to work under Windows pwsh 7 as well. PowerShell 7 on
+# Linux (this dev/CI box) uses .NET's trimmed-down System.Web compatibility shim, which does not
+# implement Membership.GeneratePassword at all.
+#
+# This capability probe is a plain function, deliberately called fresh wherever it's needed
+# rather than cached once into a $script: variable, because Pester v5 runs Discovery and Run as
+# two separate passes with their own session state: a $script: variable set by loose
+# (Describe-external) code or a BeforeAll body during Discovery does not reliably survive into
+# the Run-phase session that later executes each It block's body (confirmed: an It body reading
+# a Discovery-set $script: variable throws "cannot be retrieved because it has not been set").
+# -Skip parameters, by contrast, ARE evaluated during Discovery, so calling this function
+# directly in each -Skip: expression below is both correct and simplest -- no BeforeAll/$script:
+# hazard either way.
+function Test-CanGenerateRandomPassword {
+    try {
+        Add-Type -AssemblyName System.Web -ErrorAction Stop
+        [System.Web.Security.Membership].GetMethod('GeneratePassword', [type[]]@([int], [int])) | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 BeforeAll {
     # Common.ps1 only sets script-scoped variables and defines functions at
     # dot-source time -- it has no side effects when loaded -- so it is safe
@@ -26,22 +51,20 @@ BeforeAll {
     # external command. No guard was added to Common.ps1 for this suite.
     . "$PSScriptRoot/../../Deployment/Scripts/Common.ps1"
 
-    # New-RandomPassword calls [System.Web.Security.Membership]::GeneratePassword,
-    # a full .NET Framework-only API. Windows PowerShell 5.1 (the toolkit's actual
-    # production runtime) always has this available, and it is expected to work
-    # under Windows pwsh 7 as well. PowerShell 7 on Linux (this dev/CI box) uses
-    # .NET's trimmed-down System.Web compatibility shim, which does not implement
-    # Membership.GeneratePassword at all. Detect that capability once here so the
-    # affected cases are explicitly SKIPPED below -- with the reason recorded --
-    # rather than silently omitted or force-failed on a platform this function
-    # was never meant to run on.
-    $script:CanGenerateRandomPassword = $false
-    try {
-        Add-Type -AssemblyName System.Web -ErrorAction Stop
-        [System.Web.Security.Membership].GetMethod('GeneratePassword', [type[]]@([int], [int])) | Out-Null
-        $script:CanGenerateRandomPassword = $true
-    } catch {
-        $script:CanGenerateRandomPassword = $false
+    # Re-declared here (identical body to the top-level copy above): a function defined only at
+    # Discovery time does not carry over into the Run-phase session either -- an It body calling
+    # it would throw CommandNotFoundException, the same cross-phase-session hazard as the
+    # $script: variable this replaced. BeforeAll bodies, unlike loose script statements, ARE
+    # re-run during Run, so this copy is what makes the function available inside It bodies
+    # (e.g. the "records why..." test below); the top-level copy is what makes -Skip work.
+    function Test-CanGenerateRandomPassword {
+        try {
+            Add-Type -AssemblyName System.Web -ErrorAction Stop
+            [System.Web.Security.Membership].GetMethod('GeneratePassword', [type[]]@([int], [int])) | Out-Null
+            return $true
+        } catch {
+            return $false
+        }
     }
 
     # GetInvalidFileNameChars() differs by platform (Windows: many punctuation
@@ -105,26 +128,54 @@ Describe 'ConvertTo-PlainHashtable' {
     It 'adversarial: converts nested arrays-of-arrays, preserving the nested array shape' {
         $arr = @(@(1, 2), @(3, 4))
 
-        $plain = @(ConvertTo-PlainHashtable $arr)
+        # No @(...) wrap needed: the function's array branch now emits the whole array as one
+        # pipeline object (see the empty-array regression test below), so wrapping the call
+        # site here would double-wrap it into a 1-element array containing the real array.
+        $plain = ConvertTo-PlainHashtable $arr
 
         $plain.Count | Should -Be 2
-        # Not piped, for the same reason as the ConvertTo-PlainHashtable test above.
         $plain[0].GetType().FullName | Should -Be 'System.Object[]'
         $plain[0] | Should -Be @(1, 2)
         $plain[1] | Should -Be @(3, 4)
     }
 
-    It 'adversarial: an empty array input round-trips to an empty collection, not an error' {
-        # An empty array returned from a PowerShell function unrolls to zero
-        # pipeline objects, so it must be captured with @(...) to observe it
-        # as an array rather than $null -- this is normal PowerShell pipeline
-        # behaviour, not a defect in the function.
-        $plain = @(ConvertTo-PlainHashtable @())
+    It 'adversarial: an empty array input round-trips to an empty array, not $null, even without @(...) at the call site' {
+        # Regression test: ConvertTo-PlainHashtable's array branch used to `return $items`
+        # unwrapped, which PowerShell enumerates element-by-element when writing to the output
+        # stream -- for a zero-element array that means zero objects are emitted, so an
+        # unwrapped call site (exactly how Get-DesktopItemConfig in Configure-DesktopItems.ps1
+        # calls it: `ConvertTo-PlainHashtable $Config.desktop_items`, no @(...)) silently
+        # received $null instead of @(). That turned the shipped default config's
+        # `"common_desktop_items": []` into $null, which then crashed
+        # Sync-DesktopItems' `.ContainsKey()` call on a null element. The fix wraps the return
+        # in a unary comma (`return , $items`) so the array itself -- however many elements it
+        # has -- is always emitted as a single pipeline object.
+        $plain = ConvertTo-PlainHashtable @()
+        # Piping $plain into `Should` here would itself enumerate it -- for a genuinely empty
+        # array that sends zero objects downstream, which is indistinguishable from $null at
+        # the assertion. Comparing the variable directly (no pipe) avoids that trap.
+        ($null -eq $plain) | Should -BeFalse -Because 'an empty array must round-trip as @(), not collapse to $null'
+        $plain.GetType().FullName | Should -Be 'System.Object[]'
         $plain.Count | Should -Be 0
     }
 
+    It 'adversarial: a hashtable with a nested empty-array property preserves that property as an empty array, not $null' {
+        # Mirrors the real production shape (deployment_config.json's desktop_items object with
+        # common_desktop_items/final_user_desktop_items: []) parsed by ConvertFrom-Json, then
+        # converted via the recursive `$hash[$key] = ConvertTo-PlainHashtable $InputObject[$key]`
+        # call site inside the function itself -- the exact path that silently produced $null
+        # before this was fixed.
+        $json = '{"desktop_items":{"common_desktop_items":[],"final_user_desktop_items":["a"]}}'
+        $plain = ConvertTo-PlainHashtable ($json | ConvertFrom-Json)
+
+        ($null -eq $plain.desktop_items.common_desktop_items) | Should -BeFalse
+        $plain.desktop_items.common_desktop_items.GetType().FullName | Should -Be 'System.Object[]'
+        $plain.desktop_items.common_desktop_items.Count | Should -Be 0
+        $plain.desktop_items.final_user_desktop_items.Count | Should -Be 1
+    }
+
     It 'adversarial: preserves $null elements found inside an array' {
-        $plain = @(ConvertTo-PlainHashtable @(1, $null, 3))
+        $plain = ConvertTo-PlainHashtable @(1, $null, 3)
         $plain.Count | Should -Be 3
         $plain[1] | Should -BeNullOrEmpty
     }
@@ -387,26 +438,26 @@ Describe 'ConvertTo-ProcessArgumentString' {
 }
 
 Describe 'New-RandomPassword' {
-    It 'generates a password of the default length (20)' -Skip:(-not $script:CanGenerateRandomPassword) {
+    It 'generates a password of the default length (20)' -Skip:(-not (Test-CanGenerateRandomPassword)) {
         (New-RandomPassword).Length | Should -Be 20
     }
 
-    It 'generates a password of a caller-supplied custom length' -Skip:(-not $script:CanGenerateRandomPassword) {
+    It 'generates a password of a caller-supplied custom length' -Skip:(-not (Test-CanGenerateRandomPassword)) {
         (New-RandomPassword -Length 32).Length | Should -Be 32
     }
 
-    It 'generates different values across successive calls' -Skip:(-not $script:CanGenerateRandomPassword) {
+    It 'generates different values across successive calls' -Skip:(-not (Test-CanGenerateRandomPassword)) {
         $first = New-RandomPassword -Length 24
         $second = New-RandomPassword -Length 24
         $first | Should -Not -Be $second
     }
 
-    It 'adversarial: throws for a length too small to fit the fixed 4 non-alphanumeric characters requested' -Skip:(-not $script:CanGenerateRandomPassword) {
+    It 'adversarial: throws for a length too small to fit the fixed 4 non-alphanumeric characters requested' -Skip:(-not (Test-CanGenerateRandomPassword)) {
         { New-RandomPassword -Length 2 } | Should -Throw
     }
 
     It 'records why the cases above are (not) skipped on this platform, so the gap is visible instead of silent' {
-        if ($script:CanGenerateRandomPassword) {
+        if (Test-CanGenerateRandomPassword) {
             Set-ItResult -Skipped -Because 'System.Web.Security.Membership is available here, so the cases above ran for real'
         } else {
             Set-ItResult -Skipped -Because 'System.Web.Security.Membership is unavailable on this platform (expected on pwsh 7/Linux); the cases above were skipped rather than failed'
