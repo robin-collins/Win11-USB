@@ -466,3 +466,83 @@ Describe 'Get-RehearsalArtifactFacts and Get-RehearsalArtifactFileAssertions (re
         $dryRunResult.Status | Should -Be 'Fail'
     }
 }
+
+Describe 'Get-RehearsalAdditionalUsersAssertions and Get-RehearsalScenarioExtraAssertions (T14, real temp files)' {
+
+    BeforeEach {
+        $script:ArtifactFolder = Join-Path ([System.IO.Path]::GetTempPath()) ("rehearsal-extra-assert-test-$([guid]::NewGuid().ToString('N'))")
+        New-Item -ItemType Directory -Path $script:ArtifactFolder -Force | Out-Null
+        $script:MergedConfig = @{
+            additional_local_users = @(
+                @{ username = 'RehearsalTech'; enabled = $true; password_mode = 'random'; groups = @('Users') }
+            )
+        }
+    }
+
+    AfterEach {
+        if (Test-Path -LiteralPath $script:ArtifactFolder) {
+            Remove-Item -LiteralPath $script:ArtifactFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'returns two assertions per random-password additional_local_users entry' {
+        $results = Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig $script:MergedConfig
+        $results | Should -HaveCount 2
+    }
+
+    It 'fails the "exists on media" check when no password report file was harvested' {
+        $results = Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig $script:MergedConfig
+        $existsResult = $results | Where-Object { $_.Name -match 'exists on media' }
+        $existsResult.Status | Should -Be 'Fail'
+    }
+
+    It 'passes the "exists on media" check once the password report file is present anywhere under the artifact folder' {
+        $nested = Join-Path $script:ArtifactFolder 'Deployment_Reports\SomeDevice'
+        New-Item -ItemType Directory -Path $nested -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $nested 'local-user-password-RehearsalTech-run001.txt') -Value 'Sup3rSecret!' -Encoding UTF8
+
+        $results = Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig $script:MergedConfig
+        $existsResult = $results | Where-Object { $_.Name -match 'exists on media' }
+        $existsResult.Status | Should -Be 'Pass'
+    }
+
+    It 'passes the "not emailed" check when no harvested log references the password file at all (the vacuous case: SMTP disabled)' {
+        $results = Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig $script:MergedConfig
+        $notEmailedResult = $results | Where-Object { $_.Name -match 'not emailed' }
+        $notEmailedResult.Status | Should -Be 'Pass'
+    }
+
+    It 'fails the "not emailed" check when a harvested log line references the password file alongside the word "attach"' {
+        $logDir = Join-Path $script:ArtifactFolder 'Deployment_Logs'
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $logDir 'deploy.log') -Value 'Deployment email sent with attach: local-user-password-RehearsalTech-run001.txt' -Encoding UTF8
+
+        $results = Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig $script:MergedConfig
+        $notEmailedResult = $results | Where-Object { $_.Name -match 'not emailed' }
+        $notEmailedResult.Status | Should -Be 'Fail'
+    }
+
+    It 'ignores a disabled additional_local_users entry (no assertions for it)' {
+        $config = @{ additional_local_users = @(@{ username = 'Disabled'; enabled = $false; password_mode = 'random' }) }
+        @(Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig $config) | Should -HaveCount 0
+    }
+
+    It 'ignores a non-random password_mode entry (osit_secret/prompt have no generated report file to check)' {
+        $config = @{ additional_local_users = @(@{ username = 'Prompted'; enabled = $true; password_mode = 'prompt' }) }
+        @(Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig $config) | Should -HaveCount 0
+    }
+
+    It 'adversarial: an empty additional_local_users list produces no assertions' {
+        @(Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $script:ArtifactFolder -MergedConfig @{ additional_local_users = @() }) | Should -HaveCount 0
+    }
+
+    It 'Get-RehearsalScenarioExtraAssertions dispatches to the AdditionalUsers set only for that scenario name' {
+        @(Get-RehearsalScenarioExtraAssertions -Scenario 'AdditionalUsers' -ArtifactFolder $script:ArtifactFolder -MergedConfig $script:MergedConfig) | Should -HaveCount 2
+    }
+
+    It 'Get-RehearsalScenarioExtraAssertions returns nothing for every other scenario name' {
+        foreach ($scenario in @('Standard', 'NoWipe', 'Handover', 'ResumeKill')) {
+            @(Get-RehearsalScenarioExtraAssertions -Scenario $scenario -ArtifactFolder $script:ArtifactFolder -MergedConfig $script:MergedConfig) | Should -HaveCount 0
+        }
+    }
+}

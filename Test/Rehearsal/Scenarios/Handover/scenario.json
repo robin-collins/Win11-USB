@@ -1,0 +1,8 @@
+{
+  "failure_injection": {
+    "trigger_step": "LocalHandover",
+    "trigger_when": "Completed",
+    "action": "HotRemoveMediaDisk",
+    "description": "Once the guest reports LocalHandover has completed (deployment root switched to C:\\1S-WIN11 and the handover toast has fired), hot-remove the rehearsal media VHDX from the running VM to simulate the technician ejecting the USB early -- the strongest possible proof the eject-early promise holds."
+  }
+}

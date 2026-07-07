@@ -193,9 +193,17 @@ try {
         $isHandoverScenario = [bool]($handoverConfig.ContainsKey('enabled') -and $handoverConfig.enabled)
     }
 
+    # T14: a scenario may declare a failure-injection descriptor (ResumeKill, Handover) in its
+    # own Test\Rehearsal\Scenarios\<name>\scenario.json; $null (Standard, NoWipe,
+    # AdditionalUsers) means Watch-RehearsalDeployment injects nothing.
+    $failureInjection = Get-RehearsalScenarioFailureInjection -Scenario $Scenario
+    if ($failureInjection) {
+        Write-Host "Scenario '$Scenario' declares a failure injection: $($failureInjection.Action) on '$($failureInjection.TriggerStep)' $($failureInjection.TriggerWhen)." -ForegroundColor Yellow
+    }
+
     Write-Host 'Monitoring the rehearsal (T12: Setup/WinPE, then guest deployment progress)...' -ForegroundColor Cyan
     $artifactRoot = Join-Path $scriptRoot 'Artifacts'
-    $monitorResult = Invoke-RehearsalMonitoring -VmName $VmName -Credential $ositCredential -ArtifactRoot $artifactRoot -TimeoutMinutes $TimeoutMinutes -IsHandoverScenario $isHandoverScenario
+    $monitorResult = Invoke-RehearsalMonitoring -VmName $VmName -Credential $ositCredential -ArtifactRoot $artifactRoot -TimeoutMinutes $TimeoutMinutes -IsHandoverScenario $isHandoverScenario -FailureInjection $failureInjection -MediaVhdxPath $media.VhdxPath
 
     Write-Host ''
     Write-Host "Rehearsal monitoring result: $($monitorResult.Result) (phase: $($monitorResult.Phase))" -ForegroundColor $(if ($monitorResult.Result -eq 'Success') { 'Green' } else { 'Red' })
@@ -209,7 +217,7 @@ try {
     } else {
         Write-Host ''
         Write-Host 'Running post-run assertion suite (T13)...' -ForegroundColor Cyan
-        $assertionResult = Test-RehearsalResult -VmName $VmName -Credential $ositCredential -ArtifactFolder $monitorResult.ArtifactFolder -MergedConfig $media.MergedConfig -DiskNumber ([int]$media.MergedConfig.wipe_repartition_disk_id)
+        $assertionResult = Test-RehearsalResult -VmName $VmName -Credential $ositCredential -ArtifactFolder $monitorResult.ArtifactFolder -MergedConfig $media.MergedConfig -DiskNumber ([int]$media.MergedConfig.wipe_repartition_disk_id) -Scenario $Scenario
 
         Write-Host ''
         foreach ($assertion in $assertionResult.Results) {

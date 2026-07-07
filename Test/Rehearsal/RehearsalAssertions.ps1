@@ -473,6 +473,90 @@ function Get-RehearsalArtifactFileAssertions {
     return $results.ToArray()
 }
 
+function Get-RehearsalAdditionalUsersAssertions {
+    <#
+        .SYNOPSIS
+            FABLE_TASKS.md T14's AdditionalUsers-scenario-specific assertions: the generated
+            random-password report file for each additional_local_users entry exists somewhere
+            in the harvested artifacts, and was never referenced as an email attachment.
+
+        .DESCRIPTION
+            Real file I/O against the already-harvested artifact folder, no Hyper-V or live
+            guest required -- same category as Get-RehearsalArtifactFacts. The password report
+            filename convention (local-user-password-<safename>-<runid>.txt) matches
+            Start-Deployment.ps1's own Resolve-LocalUserPassword. The "not an email attachment"
+            half is checked against every harvested log file's text (Deployment\Logs, searched
+            recursively): Send-DeploymentEmail.ps1 only ever attaches the Markdown/JSON reports,
+            asset inventory, and logs zip, never a password report file, so this assertion Passes
+            even when SMTP is disabled and no email was sent at all (the vacuous case for every
+            scenario overlay in this repo) -- it exists to catch a future regression that adds
+            the password file to the attachment list, not to prove an email was actually sent.
+    #>
+    [OutputType([System.Object[]])]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactFolder,
+        [Parameter(Mandatory = $true)][hashtable]$MergedConfig
+    )
+
+    $results = New-Object 'System.Collections.Generic.List[object]'
+
+    $randomPasswordUsernames = @()
+    if ($MergedConfig.ContainsKey('additional_local_users') -and $null -ne $MergedConfig.additional_local_users) {
+        $randomPasswordUsernames = @(@($MergedConfig.additional_local_users) | Where-Object {
+                $_ -is [System.Collections.IDictionary] -and
+                (-not ($_.Contains('enabled') -and -not [bool]$_['enabled'])) -and
+                ([string]$_['password_mode']) -ieq 'random'
+            } | ForEach-Object { [string]$_['username'] })
+    }
+
+    foreach ($username in $randomPasswordUsernames) {
+        $safeName = ($username -replace '[^A-Za-z0-9_-]', '_')
+        $passwordFile = $null
+        if (Test-Path -LiteralPath $ArtifactFolder -PathType Container) {
+            $passwordFile = Get-ChildItem -Path $ArtifactFolder -Recurse -Filter "local-user-password-$safeName-*.txt" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+
+        $results.Add((Test-RehearsalAssertion -Name "Generated password report for '$username' exists on media" -ScriptBlock {
+                    if (-not $passwordFile) { return @{ Status = 'Fail'; Message = "No local-user-password-$safeName-*.txt found under the harvested artifact folder." } }
+                    return @{ Status = 'Pass'; Message = "Found $($passwordFile.FullName)." }
+                })) | Out-Null
+
+        $results.Add((Test-RehearsalAssertion -Name "Generated password report for '$username' was not emailed as an attachment" -ScriptBlock {
+                    if (-not (Test-Path -LiteralPath $ArtifactFolder -PathType Container)) { return @{ Status = 'Fail'; Message = 'Harvested artifact folder does not exist; cannot check the email attachment list.' } }
+                    $logFiles = @(Get-ChildItem -Path $ArtifactFolder -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.log', '.json', '.jsonl') })
+                    $logMatches = @($logFiles | Select-String -Pattern "local-user-password-$safeName" -SimpleMatch -ErrorAction SilentlyContinue | Where-Object { $_.Line -match 'attach' })
+                    if ($logMatches.Count -gt 0) {
+                        return @{ Status = 'Fail'; Message = "Found a log entry referencing an attachment for local-user-password-${safeName}: $($logMatches[0].Path)." }
+                    }
+                    return @{ Status = 'Pass'; Message = "No harvested log references local-user-password-$safeName as an email attachment." }
+                })) | Out-Null
+    }
+
+    return $results.ToArray()
+}
+
+function Get-RehearsalScenarioExtraAssertions {
+    <#
+        .SYNOPSIS
+            Dispatches to any scenario-specific assertion set beyond Test-RehearsalResult's six
+            generic categories (FABLE_TASKS.md T14). Returns @() for every scenario that adds
+            none (Standard, NoWipe, Handover, ResumeKill today).
+    #>
+    [OutputType([System.Object[]])]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Scenario,
+        [Parameter(Mandatory = $true)][string]$ArtifactFolder,
+        [Parameter(Mandatory = $true)][hashtable]$MergedConfig
+    )
+
+    switch ($Scenario) {
+        'AdditionalUsers' { return Get-RehearsalAdditionalUsersAssertions -ArtifactFolder $ArtifactFolder -MergedConfig $MergedConfig }
+        default { return @() }
+    }
+}
+
 # ============================================================================================
 # --- Guest fact gatherers (Hyper-V + PowerShell Direct required) ---
 # ============================================================================================
@@ -742,6 +826,12 @@ function Test-RehearsalResult {
             Tolerance (as a percentage of the expected size) for the EFI/MSR/recovery partition
             size comparisons. Defaults to 3.0, per FABLE_TASKS.md T13.
 
+        .PARAMETER Scenario
+            Name of the rehearsal scenario under test (FABLE_TASKS.md T14), used only to look up
+            any scenario-specific assertions beyond the six generic categories above via
+            Get-RehearsalScenarioExtraAssertions (e.g. AdditionalUsers' password-report checks).
+            Omit or leave blank for none (T13's original behaviour is unchanged either way).
+
         .OUTPUTS
             Ordered hashtable: @{ Results (assertion records); Summary (Get-RehearsalAssertionSummary
             output); ReportPath (string); Passed (bool) }.
@@ -761,7 +851,8 @@ function Test-RehearsalResult {
         [string]$ReportFolder,
         [string]$VolumeLabel = '1S-WIN11',
         [int]$DiskNumber = 0,
-        [double]$PartitionSizeTolerancePercent = 3.0
+        [double]$PartitionSizeTolerancePercent = 3.0,
+        [string]$Scenario = ''
     )
 
     Assert-HyperVAvailable
@@ -1036,6 +1127,13 @@ function Test-RehearsalResult {
                     if ($partition.attributes_hex -ieq $script:RehearsalWinReGptAttributesHex) { return @{ Status = 'Pass'; Message = "WinRE partition GPT attributes are $($partition.attributes_hex)." } }
                     return @{ Status = 'Fail'; Message = "WinRE partition GPT attributes are $($partition.attributes_hex); expected $script:RehearsalWinReGptAttributesHex." }
                 })) | Out-Null
+    }
+
+    # --- 6. Scenario-specific (FABLE_TASKS.md T14) ---------------------------------------------
+    if (-not [string]::IsNullOrWhiteSpace($Scenario)) {
+        foreach ($extra in @(Get-RehearsalScenarioExtraAssertions -Scenario $Scenario -ArtifactFolder $ArtifactFolder -MergedConfig $MergedConfig)) {
+            $results.Add($extra) | Out-Null
+        }
     }
 
     # --- Aggregate, render, write -------------------------------------------------------------

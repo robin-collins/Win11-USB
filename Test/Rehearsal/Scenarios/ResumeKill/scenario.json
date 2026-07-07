@@ -1,0 +1,8 @@
+{
+  "failure_injection": {
+    "trigger_step": "WindowsUpdates",
+    "trigger_when": "Started",
+    "action": "ForceStopRestartVm",
+    "description": "Once the guest reports WindowsUpdates has started, force-stop the VM (simulating a crash/power loss) and restart it, proving the resume scheduled task + autologon chain brings the run to Complete anyway."
+  }
+}

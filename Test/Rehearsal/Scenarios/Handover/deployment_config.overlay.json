@@ -1,0 +1,13 @@
+{
+  "wipe_repartition_drive": true,
+  "require_ac_power": false,
+  "msp_wifi_setup": { "enabled": false },
+  "computer_name_mode": "serial",
+  "install_winget_apps": true,
+  "datto_rmm_site_id_uuid": "",
+  "local_deployment_handover": {
+    "enabled": true,
+    "local_path": "C:\\1S-WIN11",
+    "require_network": true
+  }
+}

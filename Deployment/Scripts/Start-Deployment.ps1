@@ -496,6 +496,15 @@ function Invoke-DeploymentStep {
 
                 Write-Log -Level Success -Message 'Dry run: credential scrub preview complete (see the dry-run summary for the full would-scrub/not-present list). Deployment task sequence would be complete.'
                 Show-DeploymentToast -Title 'Windows 11 Deployment Complete' -Message "$env:COMPUTERNAME would be ready for customer onboarding (dry run)."
+                # The caller's orchestrator loop re-reads state from disk immediately after this
+                # function returns (to check reboot_pending), discarding whatever it holds in
+                # memory. Every Write-DryRunAction call above only appended to $State in memory;
+                # without persisting here first, the entire scrub-preview audit trail for this
+                # step would silently vanish from state.dryrun_actions and never reach the T08
+                # dry-run summary report, even though it did print to the log. Every other
+                # dry-run-mutating step in this file (Invoke-ComputerNameStep,
+                # Invoke-CreateLocalAdminStep) persists for the same reason.
+                Write-DeploymentState -State $State -StatePath $StatePath
                 return
             }
 

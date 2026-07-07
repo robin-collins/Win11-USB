@@ -558,3 +558,7 @@ Key deployment moments show a Windows toast notification to the interactively lo
 Critical prerequisite failures stop immediately. Runtime task failures are written to state and reports before the script exits.
 
 The toolkit does not continue blindly after a failed required update, driver, or app phase. Fix the cause, rerun `Start-Deployment.ps1`, and resume from the next incomplete step.
+
+## Testing
+
+This toolkit has a three-tier testing strategy: CI unit tests (`Tests/Unit`), the `-DryRun` mode documented above, and a Hyper-V rehearsal harness (`Test\Rehearsal`) that boots a real virtual machine and runs the entire unattended flow end-to-end. See [`TESTING.md`](TESTING.md) for a decision guide on which tier to use for a given change, exact commands, expected durations, how to read each tier's report, and a pre-release checklist.
