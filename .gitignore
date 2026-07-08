@@ -38,12 +38,18 @@ Deployment/Drivers/*/*
 !Deployment/Drivers/Lenovo/.gitkeep
 !Deployment/Drivers/Generic/.gitkeep
 
-# Network/WiFi driver vendor folders are nested one level deeper (Drivers/Network/<Vendor>),
-# so the vendor directories themselves must be re-included before their contents can be
-# re-ignored, or their .gitkeep placeholders would be excluded along with real driver payloads.
+# Network/WiFi and Storage driver vendor folders are nested one level deeper than
+# Dell/HP/Lenovo/Generic above (Drivers/Network/<Vendor>, Drivers/Storage/<Vendor>), so the
+# vendor directories themselves must be re-included before their contents can be re-ignored, or
+# their .gitkeep placeholders would be excluded along with real driver payloads -- confirmed by
+# reproducing exactly this (Drivers/Storage/<Vendor>/.gitkeep silently never committed, so a
+# fresh clone was missing the Storage vendor folders entirely) before this comment was written.
 !Deployment/Drivers/Network/*/
 Deployment/Drivers/Network/*/*
 !Deployment/Drivers/Network/*/.gitkeep
+!Deployment/Drivers/Storage/*/
+Deployment/Drivers/Storage/*/*
+!Deployment/Drivers/Storage/*/.gitkeep
 
 # Hyper-V rehearsal harness (Test\Rehearsal, Tier 1) is host-side only and never ships on the
 # USB. Per-run scratch state, harvested artifacts, and rehearsal secrets must never be

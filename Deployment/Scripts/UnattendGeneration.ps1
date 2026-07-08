@@ -290,11 +290,35 @@ function New-DiskCheckScript {
         'echo Target disk id: %TARGETDISK%  Minimum disks required: %MINDISKS%  Minimum target disk size GB: %MINGB% >> "%LOGFILE%"',
         '',
         "set DRIVERROOT=%OSITDRIVE%\$script:StorageDriversRelativePath",
+        # Iterates vendor subfolders one at a time (Storage\<Vendor>\*.inf), the same shape as
+        # Install-NetworkDrivers.ps1's per-vendor loop for Deployment\Drivers\Network\<Vendor> --
+        # deliberately not a single flat "for /r" across the whole Storage tree, so a technician
+        # reading OSIT-DiskCheck.log sees exactly which vendor folder was tried and how many INF
+        # files it had, instead of one undifferentiated pile of drvload lines. Only vendor
+        # subfolders are considered (matching the Network convention); a loose .inf dropped
+        # directly under Storage\ with no vendor subfolder is not picked up.
         'if exist "%DRIVERROOT%" (',
-        '    echo Loading boot-critical storage drivers from %DRIVERROOT%>> "%LOGFILE%"',
-        '    for /r "%DRIVERROOT%" %%F in (*.inf) do (',
-        '        echo   drvload %%F>> "%LOGFILE%"',
-        '        drvload "%%F">> "%LOGFILE%" 2>&1',
+        '    echo Loading boot-critical storage drivers from %DRIVERROOT% by vendor folder>> "%LOGFILE%"',
+        '    for /d %%V in ("%DRIVERROOT%\*") do (',
+        # "for /r %%V %%F in (...)" -- using a metavariable directly as /r's path argument -- is
+        # ambiguous to cmd.exe's parser (both the /r path and the loop variable are %-sigils) and
+        # was confirmed to silently match nothing rather than error, reproduced against this exact
+        # nested for /d + for /r shape before switching to pushd/popd, which sidesteps the
+        # ambiguity entirely by giving for /r no path argument (it then defaults to the current
+        # directory).
+        '        pushd "%%V"',
+        '        set VENDORINFCOUNT=0',
+        '        for /r %%F in (*.inf) do set /a VENDORINFCOUNT+=1',
+        '        if !VENDORINFCOUNT! GTR 0 (',
+        '            echo   Vendor %%~nxV: !VENDORINFCOUNT! INF file^(s^) >> "%LOGFILE%"',
+        '            for /r %%F in (*.inf) do (',
+        '                echo     drvload %%F>> "%LOGFILE%"',
+        '                drvload "%%F">> "%LOGFILE%" 2>&1',
+        '            )',
+        '        ) else (',
+        '            echo   Vendor %%~nxV: no INF files; skipping>> "%LOGFILE%"',
+        '        )',
+        '        popd',
         '    )',
         ') else (',
         '    echo No storage driver folder found at %DRIVERROOT%; skipping driver load.>> "%LOGFILE%"',
