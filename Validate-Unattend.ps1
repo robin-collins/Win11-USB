@@ -529,20 +529,103 @@ function Invoke-UnattendValidation {
             Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install disk' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:DiskID' -Expected $expectedDiskId
             Test-ExpectedText -Xml $xml -NamespaceManager $ns -Check 'Windows install partition' -XPath '//u:ImageInstall/u:OSImage/u:InstallTo/u:PartitionID' -Expected '3'
 
-            $runSync = Get-NodeText -Xml $xml -NamespaceManager $ns -XPath '//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path'
-            if ($runSync -and $runSync.Length -le 259) {
-                Add-ValidationResult -Status Pass -Check 'windowsPE command length' -Message "RunSynchronous command is $($runSync.Length) characters (limit 259)."
-            }
-            else {
-                $actualLength = if ($runSync) { $runSync.Length } else { 0 }
-                Add-ValidationResult -Status Fail -Check 'windowsPE command length' -Message "RunSynchronous command is $actualLength characters; the unattend Path limit is 259 and Windows Setup fails with 0x80004005 - 0x40030 when it is exceeded."
+            $runSyncPaths = @($xml.SelectNodes('//u:settings[@pass="windowsPE"]//u:RunSynchronousCommand/u:Path', $ns) | ForEach-Object { $_.InnerText })
+            $diskCheckRunSync = @($runSyncPaths | Where-Object { $_ -match 'OSIT-DiskCheck\.cmd' }) | Select-Object -First 1
+            $diskPartRunSync = @($runSyncPaths | Where-Object { $_ -match 'OSIT-DiskPart\.txt' }) | Select-Object -First 1
+
+            foreach ($commandEntry in @(
+                    @{ Label = 'disk-check'; Path = $diskCheckRunSync }
+                    @{ Label = 'diskpart'; Path = $diskPartRunSync }
+                )) {
+                $commandPath = $commandEntry.Path
+                if ($commandPath -and $commandPath.Length -le 259) {
+                    Add-ValidationResult -Status Pass -Check "windowsPE command length ($($commandEntry.Label))" -Message "RunSynchronous command is $($commandPath.Length) characters (limit 259)."
+                }
+                else {
+                    $actualLength = if ($commandPath) { $commandPath.Length } else { 0 }
+                    Add-ValidationResult -Status Fail -Check "windowsPE command length ($($commandEntry.Label))" -Message "RunSynchronous command is $actualLength characters; the unattend Path limit is 259 and Windows Setup fails with 0x80004005 - 0x40030 when it is exceeded."
+                }
             }
 
-            if ($runSync -match 'OSIT-DiskPart\.txt' -and $runSync -match 'diskpart\s+/s') {
+            if ($diskCheckRunSync -and $diskCheckRunSync -match 'OSIT-DiskCheck\.cmd') {
+                Add-ValidationResult -Status Pass -Check 'Disk-check script reference' -Message 'RunSynchronous command locates and runs USB-root OSIT-DiskCheck.cmd before the diskpart wipe.'
+            }
+            else {
+                Add-ValidationResult -Status Fail -Check 'Disk-check script reference' -Message 'RunSynchronous command does not reference USB-root OSIT-DiskCheck.cmd.'
+            }
+
+            if ($diskPartRunSync -and $diskPartRunSync -match 'OSIT-DiskPart\.txt' -and $diskPartRunSync -match 'diskpart\s+/s') {
                 Add-ValidationResult -Status Pass -Check 'DiskPart script reference' -Message 'RunSynchronous command locates USB-root OSIT-DiskPart.txt and runs diskpart /s against it.'
             }
             else {
                 Add-ValidationResult -Status Fail -Check 'DiskPart script reference' -Message 'RunSynchronous command does not reference USB-root OSIT-DiskPart.txt with diskpart /s.'
+            }
+
+            $diskCheckScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskCheckScriptFileName
+            if (Test-Path -LiteralPath $diskCheckScriptPath -PathType Leaf) {
+                Add-ValidationResult -Status Pass -Check 'Disk-check script file' -Message "Companion disk-check script found: $diskCheckScriptPath"
+                $diskCheckContent = Get-Content -LiteralPath $diskCheckScriptPath -Raw
+
+                $minDiskCount = [int](Get-ConfigProperty -Config $config -Name 'wipe_minimum_disk_count' -Default 2)
+                $minTargetDiskGb = [int](Get-ConfigProperty -Config $config -Name 'wipe_minimum_target_disk_gb' -Default 100)
+                foreach ($fragment in @('drvload', 'Deployment\Drivers\Storage', 'diskpart', "set TARGETDISK=$expectedDiskId", "set MINDISKS=$minDiskCount", "set MINGB=$minTargetDiskGb", 'OSIT-DiskAssert.vbs', 'errorlevel 1', 'DIAGSCRIPT', 'DIAGLOG', 'exit /b 1', 'exit /b 0')) {
+                    if ($diskCheckContent -match [regex]::Escape($fragment)) {
+                        Add-ValidationResult -Status Pass -Check "Disk-check command: $fragment" -Message 'Expected disk-check fragment found.'
+                    }
+                    else {
+                        Add-ValidationResult -Status Fail -Check "Disk-check command: $fragment" -Message 'Expected disk-check fragment missing from OSIT-DiskCheck.cmd.'
+                    }
+                }
+            }
+            else {
+                Add-ValidationResult -Status Fail -Check 'Disk-check script file' -Message "windowsPE pass expects $script:DiskCheckScriptFileName beside the answer file, but it was not found: $diskCheckScriptPath"
+            }
+
+            $diskAssertScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskAssertScriptFileName
+            if (Test-Path -LiteralPath $diskAssertScriptPath -PathType Leaf) {
+                Add-ValidationResult -Status Pass -Check 'Disk-assert script file' -Message "Companion WMI disk-assertion script found: $diskAssertScriptPath"
+                $diskAssertContent = Get-Content -LiteralPath $diskAssertScriptPath -Raw
+
+                $assertNoPartitions = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_no_existing_partitions' -Default $true)
+                $assertInterfaceType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_interface_type' -Default $false)
+                $assertMediaType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_media_type' -Default $false)
+                $maxTargetDiskGb = [int](Get-ConfigProperty -Config $config -Name 'wipe_maximum_target_disk_gb' -Default 4000)
+
+                $expectedFragments = @("PHYSICALDRIVE$expectedDiskId", 'WScript.Quit 1')
+                if ($assertNoPartitions) { $expectedFragments += 'drive.Partitions' }
+                if ($assertInterfaceType) { $expectedFragments += 'drive.InterfaceType' }
+                if ($assertMediaType) { $expectedFragments += 'drive.MediaType' }
+                if ($maxTargetDiskGb -gt 0) { $expectedFragments += "expected = $maxTargetDiskGb" }
+
+                foreach ($fragment in $expectedFragments) {
+                    if ($diskAssertContent -match [regex]::Escape($fragment)) {
+                        Add-ValidationResult -Status Pass -Check "Disk-assert command: $fragment" -Message 'Expected disk-assertion fragment found.'
+                    }
+                    else {
+                        Add-ValidationResult -Status Fail -Check "Disk-assert command: $fragment" -Message 'Expected disk-assertion fragment missing from OSIT-DiskAssert.vbs.'
+                    }
+                }
+            }
+            else {
+                Add-ValidationResult -Status Fail -Check 'Disk-assert script file' -Message "OSIT-DiskCheck.cmd expects $script:DiskAssertScriptFileName beside the answer file, but it was not found: $diskAssertScriptPath"
+            }
+
+            $diskDiagScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskDiagScriptFileName
+            if (Test-Path -LiteralPath $diskDiagScriptPath -PathType Leaf) {
+                Add-ValidationResult -Status Pass -Check 'Disk-diagnostic script file' -Message "Companion on-failure diagnostic script found: $diskDiagScriptPath"
+                $diskDiagContent = Get-Content -LiteralPath $diskDiagScriptPath -Raw
+
+                foreach ($fragment in @('Win32_ComputerSystem', 'Win32_BIOS', 'Win32_DiskDrive', 'Win32_PnPEntity', 'ConfigManagerErrorCode', 'MsgBox', 'OpenTextFile')) {
+                    if ($diskDiagContent -match [regex]::Escape($fragment)) {
+                        Add-ValidationResult -Status Pass -Check "Disk-diagnostic command: $fragment" -Message 'Expected disk-diagnostic fragment found.'
+                    }
+                    else {
+                        Add-ValidationResult -Status Fail -Check "Disk-diagnostic command: $fragment" -Message 'Expected disk-diagnostic fragment missing from OSIT-DiskDiag.vbs.'
+                    }
+                }
+            }
+            else {
+                Add-ValidationResult -Status Fail -Check 'Disk-diagnostic script file' -Message "OSIT-DiskCheck.cmd expects $script:DiskDiagScriptFileName beside the answer file, but it was not found: $diskDiagScriptPath"
             }
 
             $diskPartScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskPartScriptFileName
@@ -689,6 +772,24 @@ function New-CiGeneratedUnattendArtifacts {
         # ASCII avoids a UTF-8 BOM, which diskpart /s misreads as part of the first command -
         # matching exactly how Initialize-UsbDeployment.ps1 writes this file.
         Set-Content -LiteralPath $generatedDiskPartPath -Value $generated.DiskPartScript -Encoding ASCII -Force -ErrorAction Stop
+    }
+
+    if ($null -ne $generated.DiskCheckScript) {
+        $generatedDiskCheckPath = Join-Path $DestinationDirectory $script:DiskCheckScriptFileName
+        # ASCII avoids a UTF-8 BOM, matching exactly how Initialize-UsbDeployment.ps1 writes this file.
+        Set-Content -LiteralPath $generatedDiskCheckPath -Value $generated.DiskCheckScript -Encoding ASCII -Force -ErrorAction Stop
+    }
+
+    if ($null -ne $generated.DiskAssertScript) {
+        $generatedDiskAssertPath = Join-Path $DestinationDirectory $script:DiskAssertScriptFileName
+        # ASCII avoids a UTF-8 BOM, matching exactly how Initialize-UsbDeployment.ps1 writes this file.
+        Set-Content -LiteralPath $generatedDiskAssertPath -Value $generated.DiskAssertScript -Encoding ASCII -Force -ErrorAction Stop
+    }
+
+    if ($null -ne $generated.DiskDiagScript) {
+        $generatedDiskDiagPath = Join-Path $DestinationDirectory $script:DiskDiagScriptFileName
+        # ASCII avoids a UTF-8 BOM, matching exactly how Initialize-UsbDeployment.ps1 writes this file.
+        Set-Content -LiteralPath $generatedDiskDiagPath -Value $generated.DiskDiagScript -Encoding ASCII -Force -ErrorAction Stop
     }
 
     return $generatedAutounattendPath

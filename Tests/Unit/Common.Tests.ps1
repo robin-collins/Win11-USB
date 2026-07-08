@@ -200,6 +200,115 @@ Describe 'Merge-Config' {
     }
 }
 
+Describe 'Get-BloatwareSelectors' {
+    It 'returns an entry for every id Set-SystemTweaks.ps1''s default system_tweaks.remove_bloatware lists' {
+        $catalog = Get-BloatwareSelectors
+        foreach ($id in @('RemoveBingSearch', 'RemoveCortana', 'RemoveZuneVideo', 'RemoveStepsRecorder', 'RemoveGetStarted', 'RemoveWordPad', 'RemoveXboxApps')) {
+            $catalog.ContainsKey($id) | Should -BeTrue
+        }
+    }
+
+    It 'gives every Package-type entry at least one selector' {
+        $catalog = Get-BloatwareSelectors
+        foreach ($id in @('RemoveBingSearch', 'RemoveCortana', 'RemoveZuneVideo', 'RemoveGetStarted', 'RemoveXboxApps')) {
+            @($catalog[$id].Packages).Count | Should -BeGreaterThan 0
+        }
+    }
+
+    It 'gives every Capability-type entry at least one selector' {
+        $catalog = Get-BloatwareSelectors
+        foreach ($id in @('RemoveStepsRecorder', 'RemoveWordPad')) {
+            @($catalog[$id].Capabilities).Count | Should -BeGreaterThan 0
+        }
+    }
+
+    It 'attaches the GameDVR DefaultUserRegistry special-case only to RemoveXboxApps' {
+        $catalog = Get-BloatwareSelectors
+        $catalog['RemoveXboxApps'].DefaultUserRegistry.Name | Should -Be 'AppCaptureEnabled'
+        $catalog['RemoveBingSearch'].ContainsKey('DefaultUserRegistry') | Should -BeFalse
+    }
+}
+
+Describe 'Get-StartFolderBlob' {
+    It 'returns 16 bytes per requested folder' {
+        $blob = Get-StartFolderBlob -Names @('Documents', 'Downloads')
+        $blob.Length | Should -Be 32
+    }
+
+    It 'returns bytes in a fixed alphabetical-by-Id order, independent of input order' {
+        $forward = Get-StartFolderBlob -Names @('Documents', 'Downloads')
+        $reversed = Get-StartFolderBlob -Names @('Downloads', 'Documents')
+        [System.Convert]::ToBase64String($forward) | Should -Be ([System.Convert]::ToBase64String($reversed))
+    }
+
+    It 'normalizes names with spaces the same as the equivalent Id' {
+        $spaced = Get-StartFolderBlob -Names @('File Explorer')
+        $noSpace = Get-StartFolderBlob -Names @('FileExplorer')
+        [System.Convert]::ToBase64String($spaced) | Should -Be ([System.Convert]::ToBase64String($noSpace))
+    }
+
+    It 'is case-insensitive on folder names' {
+        $lower = Get-StartFolderBlob -Names @('documents')
+        $mixed = Get-StartFolderBlob -Names @('Documents')
+        [System.Convert]::ToBase64String($lower) | Should -Be ([System.Convert]::ToBase64String($mixed))
+    }
+
+    It 'returns an empty array for an empty Names list' {
+        $blob = Get-StartFolderBlob -Names @()
+        $blob.Length | Should -Be 0
+    }
+
+    It 'adversarial: throws a clear error naming the unknown folder, not a generic key-not-found error' {
+        { Get-StartFolderBlob -Names @('NotARealFolder') } | Should -Throw '*NotARealFolder*'
+    }
+
+    It 'adversarial: does not silently drop a duplicate name (still returns one copy''s worth of bytes)' {
+        $blob = Get-StartFolderBlob -Names @('Documents', 'Documents')
+        $blob.Length | Should -Be 16
+    }
+}
+
+Describe 'Get-WlanProfileSsid' {
+    It 'reads the SSID from the standard exported-profile shape (SSIDConfig/SSID/name)' {
+        $path = Join-Path $TestDrive 'standard.xml'
+        Set-Content -LiteralPath $path -Value @'
+<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+  <name>OfficeWiFi</name>
+  <SSIDConfig>
+    <SSID>
+      <hex>4F6666696365576946 69</hex>
+      <name>OfficeWiFi</name>
+    </SSID>
+  </SSIDConfig>
+</WLANProfile>
+'@
+        Get-WlanProfileSsid -ProfileXmlPath $path | Should -Be 'OfficeWiFi'
+    }
+
+    It 'falls back to the top-level name element when SSIDConfig/SSID/name is absent' {
+        $path = Join-Path $TestDrive 'minimal.xml'
+        Set-Content -LiteralPath $path -Value @'
+<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+  <name>HomeNetwork</name>
+</WLANProfile>
+'@
+        Get-WlanProfileSsid -ProfileXmlPath $path | Should -Be 'HomeNetwork'
+    }
+
+    It 'adversarial: throws naming the file path when neither shape of a name element is present' {
+        $path = Join-Path $TestDrive 'broken.xml'
+        Set-Content -LiteralPath $path -Value @'
+<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+  <connectionType>ESS</connectionType>
+</WLANProfile>
+'@
+        { Get-WlanProfileSsid -ProfileXmlPath $path } | Should -Throw "*$path*"
+    }
+}
+
 Describe 'Get-SafeName' {
     It 'falls back to the default "Unknown" for an empty string' {
         Get-SafeName -Value '' | Should -Be 'Unknown'

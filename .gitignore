@@ -9,6 +9,9 @@ Autounattend.local.xml
 # Generated WinPE partitioning artifacts (written to the USB root by Initialize-UsbDeployment.ps1)
 OSIT-DiskPart.txt
 OSIT-DiskPart.log
+OSIT-DiskAssert.vbs
+OSIT-DiskDiag.vbs
+OSIT-DiskDiag.log
 
 # Deployment runtime output
 Deployment/State/*.json
@@ -24,6 +27,11 @@ Deployment/Apps/Local/*
 !Deployment/Apps/Local/.gitkeep
 Deployment/Apps/Winget/*
 !Deployment/Apps/Winget/.gitkeep
+
+# WiFi profiles exported via `netsh wlan export profile key=clear` contain real, plaintext
+# network passwords -- never committed, same treatment as .env.
+Deployment/WifiProfiles/*
+!Deployment/WifiProfiles/.gitkeep
 Deployment/Drivers/*/*
 !Deployment/Drivers/Dell/.gitkeep
 !Deployment/Drivers/HP/.gitkeep
@@ -47,5 +55,14 @@ Test/Rehearsal/Artifacts/*
 Test/Rehearsal/.working/
 Test/Rehearsal/**/.env
 Test/Rehearsal/**/*.env
+Test/Rehearsal/VhdBootVms/
 
 *.vhd
+*.vhdx
+
+# External/unattend-generator is a git submodule (C# source only); its .NET build/publish
+# output is a local, reproducible artifact (see Build-UnattendGeneratorLibrary.ps1), not
+# something to commit.
+External/unattend-generator/bin/
+External/unattend-generator/obj/
+External/unattend-generator/publish/

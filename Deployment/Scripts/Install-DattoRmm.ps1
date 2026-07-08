@@ -114,9 +114,81 @@ if ($signature.Status -ne 'Valid') {
 }
 Write-Log -Level Info -Message "Datto RMM installer signature is valid: $($signature.SignerCertificate.Subject)"
 
+function Invoke-DattoRmmInstaller {
+    <#
+        .SYNOPSIS
+            Runs the Datto RMM installer and waits for it, bounded by $TimeoutSeconds --
+            unlike a plain `Start-Process -Wait`, this stops waiting the moment the agent is
+            detected as installed even if the installer's own process has not exited yet.
+
+        .DESCRIPTION
+            Confirmed against a real deployment: the Datto/CentraStage installer can remain
+            resident well after the agent service is installed and running (background
+            self-update/check-in), so a bare Start-Process -Wait hangs the whole deployment
+            indefinitely even though the install itself already succeeded. This polls
+            Test-DattoRmmInstalled (the same detection this script's already-installed shortcut
+            above uses) alongside the process handle, so it can move on as soon as either the
+            process exits or the agent shows up as installed -- whichever happens first.
+    #>
+    param(
+        [string]$InstallerPath,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds
+    )
+
+    $argumentLine = ConvertTo-ProcessArgumentString -Arguments $Arguments
+    $tempBase = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString('N'))
+    $stdoutPath = "$tempBase.out"
+    $stderrPath = "$tempBase.err"
+
+    Write-Log -Level Info -Message "Running: $InstallerPath $argumentLine"
+    $startParams = @{
+        FilePath               = $InstallerPath
+        NoNewWindow             = $true
+        PassThru                = $true
+        RedirectStandardOutput  = $stdoutPath
+        RedirectStandardError   = $stderrPath
+    }
+    if (-not [string]::IsNullOrEmpty($argumentLine)) { $startParams.ArgumentList = $argumentLine }
+    $process = Start-Process @startParams
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $detectedInstalled = $false
+    while (-not $process.HasExited -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        if (Test-DattoRmmInstalled) { $detectedInstalled = $true; break }
+    }
+
+    $stillRunning = -not $process.HasExited
+    if ($stillRunning -and $detectedInstalled) {
+        Write-Log -Level Warn -Message 'Datto RMM agent was detected as installed while the installer process is still running; not waiting for it to exit (it is known to remain resident for background check-in/self-update).'
+    } elseif ($stillRunning) {
+        Write-Log -Level Warn -Message "Datto RMM installer did not exit within $TimeoutSeconds second(s) and the agent was not yet detected; continuing to check after leaving it running (increase datto_rmm_install_timeout_seconds if this install genuinely needs longer)."
+    }
+
+    $exitCode = if ($stillRunning) { $null } else { $process.ExitCode }
+    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { '' }
+    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+    if ($script:DeploymentLogContext) {
+        $commandLog = Join-Path $script:DeploymentLogContext.LogDir 'datto-rmm-install.log'
+        $exitCodeText = if ($null -eq $exitCode) { 'STILL RUNNING (not waited for -- see script log for why)' } else { "$exitCode" }
+        Set-Content -LiteralPath $commandLog -Value ("COMMAND: $InstallerPath $argumentLine`r`nEXIT CODE: $exitCodeText`r`n`r`nSTDOUT:`r`n$stdout`r`nSTDERR:`r`n$stderr") -Encoding UTF8 -Force
+    }
+
+    if (-not $stillRunning -and @(0, 3010) -notcontains $exitCode) {
+        throw "Datto RMM installer failed with exit code $exitCode`: $InstallerPath $argumentLine`n$stderr"
+    }
+
+    return $exitCode
+}
+
 $arguments = Split-CommandLineArguments -ArgumentString ([string]$config.datto_rmm_install_arguments)
+$installTimeoutSeconds = [int]$config.datto_rmm_install_timeout_seconds
+if ($installTimeoutSeconds -lt 30) { $installTimeoutSeconds = 30 }
 try {
-    $install = Invoke-ExternalCommand -FilePath $installerPath -Arguments $arguments -AllowedExitCodes @(0, 3010) -LogName 'datto-rmm-install.log'
+    $installExitCode = Invoke-DattoRmmInstaller -InstallerPath $installerPath -Arguments $arguments -TimeoutSeconds $installTimeoutSeconds
 } finally {
     Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
 }
@@ -130,7 +202,7 @@ $result = [ordered]@{
     site_id_uuid = $siteId
     status       = if ($installedAfter) { 'Installed' } else { 'InstallerCompletedNotDetected' }
     installer    = $installerPath
-    exit_code    = $install.exit_code
+    exit_code    = $installExitCode
     timestamp    = (Get-Date).ToString('o')
 }
 

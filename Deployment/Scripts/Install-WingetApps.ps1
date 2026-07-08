@@ -40,12 +40,16 @@ function Initialize-WingetCommand {
     if ($winget) { return $winget }
 
     try {
+        # -Force alone still shows the interactive "Do you want PowerShellGet to install and
+        # import the NuGet provider now? [Y] Yes [N] No" prompt on a fresh Windows install with
+        # no NuGet provider yet; -ForceBootstrap is the flag that actually suppresses it.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop | Out-Null
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
         }
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
         if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
-            Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+            Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop
         }
         Import-Module Microsoft.WinGet.Client -Force -ErrorAction Stop
         Repair-WinGetPackageManager -AllUsers -Latest -Force -ErrorAction Stop

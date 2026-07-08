@@ -25,6 +25,7 @@
   "power_manage_display_timeout": true,
   "power_manage_sleep_timeout": true,
   "power_manage_hibernate_timeout": true,
+  "power_disable_hibernate": true,
   "primary_setup_username": "OSIT",
   "final_resultant_user": "OSIT",
   "osit_local_admin_username": "OSIT",
@@ -42,6 +43,21 @@
       "primary_setup_user": false
     }
   ],
+  "configure_system_tweaks": true,
+  "system_tweaks": {
+    "remove_bloatware": [ "RemoveBingSearch", "RemoveCortana", "RemoveZuneVideo", "RemoveStepsRecorder", "RemoveGetStarted", "RemoveWordPad", "RemoveXboxApps" ],
+    "disable_widgets": true,
+    "left_align_taskbar": true,
+    "disable_bing_search_suggestions": true,
+    "taskbar_search_mode": "Hide",
+    "show_end_task_in_taskbar": true,
+    "launch_file_explorer_to_this_pc": true,
+    "enable_long_paths": true,
+    "harden_system_drive_acl": true,
+    "allow_powershell_scripts": true,
+    "disable_sticky_keys": true,
+    "start_folders": [ "Documents", "Downloads", "FileExplorer", "Network", "Pictures", "Settings" ]
+  },
   "configure_desktop_items": true,
   "desktop_items": {
     "manage_common_desktop": true,
@@ -62,6 +78,7 @@
   "datto_rmm_site_id_uuid": "",
   "datto_rmm_install_arguments": "",
   "datto_rmm_required": true,
+  "datto_rmm_install_timeout_seconds": 300,
   "install_local_apps": true,
   "install_offline_drivers": true,
   "install_network_drivers": true,

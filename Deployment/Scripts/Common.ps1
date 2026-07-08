@@ -8,6 +8,7 @@ $script:DeploymentVolumeLabel = '1S-WIN11'
 $script:DeploymentTaskName = 'OneSolutionWin11DeploymentResume'
 $script:DeploymentRunMutexName = 'Global\OneSolutionWin11Deployment'
 $script:DeploymentLogContext = $null
+$script:PrimaryWifiProfileFileName = 'Primary.xml'
 
 # Phase B (-DryRun) plumbing. Start-Deployment.ps1 -DryRun sets this environment variable
 # before dot-sourcing Common.ps1 (see FABLE_TASKS.md T06), so every child step script that
@@ -83,9 +84,11 @@ function Get-DeploymentSteps {
         'WindowsUpdates',
         'AssetInventory',
         'ModelDrivers',
+        'AdditionalWifiProfiles',
         'WingetApps',
         'DattoRmm',
         'LocalApps',
+        'SystemTweaks',
         'DesktopItems',
         'FinalReport',
         'EmailReport',
@@ -187,6 +190,7 @@ function Get-DeploymentPaths {
         LocalApps   = Join-Path $root 'Deployment\Apps\Local'
         Drivers     = Join-Path $root 'Deployment\Drivers'
         NetworkDrivers = Join-Path $root 'Deployment\Drivers\Network'
+        WifiProfiles = Join-Path $root 'Deployment\WifiProfiles'
         Tools       = Join-Path $root 'Deployment\Tools'
         StateFile   = Join-Path $root ('Deployment\State\' + $stateFileName)
         ConfigFile  = Join-Path $root 'Deployment\Config\deployment_config.json'
@@ -233,7 +237,7 @@ function Initialize-DeploymentDirectories {
             $paths.NetworkDrivers, (Join-Path $paths.NetworkDrivers 'Intel'),
             (Join-Path $paths.NetworkDrivers 'Realtek'), (Join-Path $paths.NetworkDrivers 'Qualcomm'),
             (Join-Path $paths.NetworkDrivers 'Broadcom'), (Join-Path $paths.NetworkDrivers 'Generic'),
-            $paths.Tools
+            $paths.WifiProfiles, $paths.Tools
         )) {
         if (-not (Test-Path -LiteralPath $path -PathType Container)) {
             New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null
@@ -314,6 +318,12 @@ function Get-DefaultDeploymentConfig {
         minimum_free_space_gb            = 25
         wipe_repartition_drive           = $false
         wipe_repartition_disk_id         = 0
+        wipe_minimum_disk_count          = 2
+        wipe_minimum_target_disk_gb      = 100
+        wipe_maximum_target_disk_gb      = 4000
+        wipe_assert_no_existing_partitions = $true
+        wipe_assert_fixed_interface_type = $false
+        wipe_assert_fixed_media_type     = $false
         efi_partition_size_mb            = 512
         msr_partition_size_mb            = 16
         recovery_partition_size_mb       = 2048
@@ -328,6 +338,8 @@ function Get-DefaultDeploymentConfig {
             encryption = 'AES'
             connect_timeout_seconds = 60
         }
+        configure_additional_wifi_profiles = $true
+        additional_wifi_profiles_connect_timeout_seconds = 20
         windows_update_max_cycles        = 5
         computer_name_mode               = 'prompt'
         computer_name_prefix             = 'NB'
@@ -337,12 +349,28 @@ function Get-DefaultDeploymentConfig {
         power_manage_display_timeout     = $true
         power_manage_sleep_timeout       = $true
         power_manage_hibernate_timeout   = $true
+        power_disable_hibernate          = $true
         primary_setup_username           = 'OSIT'
         final_resultant_user             = 'OSIT'
         osit_local_admin_username        = 'OSIT'
         osit_local_admin_full_name       = 'OSIT Local Administrator'
         osit_local_admin_description     = 'Primary OSIT local administrator account'
         additional_local_users           = @()
+        configure_system_tweaks          = $true
+        system_tweaks                    = @{
+            remove_bloatware = @('RemoveBingSearch', 'RemoveCortana', 'RemoveZuneVideo', 'RemoveStepsRecorder', 'RemoveGetStarted', 'RemoveWordPad', 'RemoveXboxApps')
+            disable_widgets = $true
+            left_align_taskbar = $true
+            disable_bing_search_suggestions = $true
+            taskbar_search_mode = 'Hide'
+            show_end_task_in_taskbar = $true
+            launch_file_explorer_to_this_pc = $true
+            enable_long_paths = $true
+            harden_system_drive_acl = $true
+            allow_powershell_scripts = $true
+            disable_sticky_keys = $true
+            start_folders = @('Documents', 'Downloads', 'FileExplorer', 'Network', 'Pictures', 'Settings')
+        }
         configure_desktop_items          = $true
         desktop_items                    = @{
             manage_common_desktop = $true
@@ -357,6 +385,7 @@ function Get-DefaultDeploymentConfig {
         datto_rmm_site_id_uuid           = ''
         datto_rmm_install_arguments      = ''
         datto_rmm_required               = $true
+        datto_rmm_install_timeout_seconds = 300
         install_local_apps               = $true
         install_offline_drivers          = $true
         install_network_drivers          = $true
@@ -388,6 +417,90 @@ function Merge-Config {
     foreach ($key in $Base.Keys) { $merged[$key] = $Base[$key] }
     foreach ($key in $Override.Keys) { $merged[$key] = $Override[$key] }
     return $merged
+}
+
+function Get-BloatwareSelectors {
+    <#
+        .SYNOPSIS
+            Static per-item package/capability selectors for Set-SystemTweaks.ps1's
+            system_tweaks.remove_bloatware config key, hand-copied from
+            External\unattend-generator\resource\Bloatware.json plus the per-app registry
+            special-cases in its modifier\Bloatware.cs.
+
+        .DESCRIPTION
+            A reference-only copy, not a runtime call into that project's compiled library --
+            see Build-UnattendGeneratorLibrary.ps1's header for why. Pure, platform-independent
+            data (no registry/CIM/process calls), so it lives here rather than in
+            Set-SystemTweaks.ps1 itself, matching this file's existing convention for
+            everything Tests\Unit\Common.Tests.ps1 exercises with real execution.
+    #>
+    @{
+        RemoveBingSearch    = @{ Packages = @('Microsoft.BingSearch') }
+        RemoveCortana       = @{ Packages = @('Microsoft.549981C3F5F10') }
+        RemoveZuneVideo     = @{ Packages = @('Microsoft.ZuneVideo') }
+        RemoveStepsRecorder = @{ Capabilities = @('App.StepsRecorder') }
+        RemoveGetStarted    = @{ Packages = @('Microsoft.Getstarted') }
+        RemoveWordPad       = @{ Capabilities = @('Microsoft.Windows.WordPad') }
+        RemoveXboxApps      = @{
+            Packages = @(
+                'Microsoft.Xbox.TCUI', 'Microsoft.XboxApp', 'Microsoft.XboxGameOverlay',
+                'Microsoft.XboxGamingOverlay', 'Microsoft.XboxIdentityProvider',
+                'Microsoft.XboxSpeechToTextOverlay', 'Microsoft.GamingApp'
+            )
+            # Matches modifier\Bloatware.cs's RemoveXboxApps CustomBloatwareStep: turns off Xbox
+            # Game Bar's background capture, independent of whether the packages above are present.
+            DefaultUserRegistry = @{
+                Path = 'Registry::HKU\DefaultUser\Software\Microsoft\Windows\CurrentVersion\GameDVR'
+                Name = 'AppCaptureEnabled'
+                Value = 0
+            }
+        }
+    }
+}
+
+function Get-StartFolderBlob {
+    <#
+        .SYNOPSIS
+            Builds the binary value for HKCU\...\Start's VisiblePlaces (Set-SystemTweaks.ps1's
+            system_tweaks.start_folders config key), from the static per-folder GUID blobs
+            hand-copied from External\unattend-generator\resource\StartFolder.json.
+    #>
+    param([string[]]$Names)
+
+    # Keys match StartFolder.Id (DisplayName with spaces removed) so config authors can use the
+    # same names as the website's own "Start Folders" option.
+    $knownFolders = [ordered]@{
+        Documents      = 'ztU0LVr6Q0WC8iLm6vd3PA=='
+        Downloads      = 'L7Nn496JVUO/zmHzexipNw=='
+        FileExplorer   = 'vCSKFAzWiUKggG7Zu6JIgg=='
+        Music          = 'IAYLsFF/MkyqHjTMVH9zFQ=='
+        Network        = 'RIF1/g0IrkKL2jTtl7ZjlA=='
+        PersonalFolder = 'SrC9dEr5aE+L1kOYBx2ovA=='
+        Pictures       = 'oAc/OArogEywWobbhF28TQ=='
+        Settings       = 'hghzUqpRQ0Kfeyd2WEZZ1A=='
+        Videos         = 'xaWzQoZ99EKApJP6ynqItQ=='
+    }
+
+    # @(...) around the pipeline (not just the [string[]] cast) matters: an empty $Names makes
+    # the pipeline itself produce $null rather than an empty array, and HashSet's constructor
+    # throws ArgumentNullException on a $null collection instead of just creating an empty set.
+    $wanted = [System.Collections.Generic.HashSet[string]]::new([string[]]@($Names | ForEach-Object { $_ -replace '\s', '' }), [System.StringComparer]::OrdinalIgnoreCase)
+    $unknown = @($wanted | Where-Object { $knownFolders.Keys -notcontains $_ })
+    if ($unknown.Count -gt 0) {
+        throw "system_tweaks.start_folders contains unknown folder name(s): $($unknown -join ', '). Valid names: $($knownFolders.Keys -join ', ')."
+    }
+
+    $bytes = [System.Collections.Generic.List[byte]]::new()
+    foreach ($name in $knownFolders.Keys) {
+        if ($wanted.Contains($name)) {
+            $bytes.AddRange([byte[]][System.Convert]::FromBase64String($knownFolders[$name]))
+        }
+    }
+    # The leading comma matters when $bytes is empty: without it, PowerShell enumerates a
+    # zero-element array onto the output stream as zero objects, and the caller's `$blob = ...`
+    # then sees $null instead of an empty [byte[]] -- the comma operator keeps the array intact
+    # as a single object regardless of its length.
+    return , [byte[]]$bytes.ToArray()
 }
 
 function Get-DeploymentConfig {
@@ -969,6 +1082,118 @@ function Test-InternetConnectivity {
         }
     }
     return $false
+}
+
+function Get-ConnectedWifiSsid {
+    <#
+        .SYNOPSIS
+            Returns the SSID the machine's WiFi adapter is currently associated with, or $null.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $interfaces = netsh.exe wlan show interfaces 2>$null
+    if (-not $interfaces) { return $null }
+    foreach ($line in $interfaces) {
+        if ($line -match '^\s*SSID\s*:\s*(.+?)\s*$' -and $line -notmatch '^\s*BSSID\s*:') {
+            return $Matches[1].Trim()
+        }
+    }
+    return $null
+}
+
+function Wait-WifiConnection {
+    <#
+        .SYNOPSIS
+            Polls Get-ConnectedWifiSsid until the machine is associated with $Ssid or
+            $TimeoutSeconds elapses.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Ssid,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if ((Get-ConnectedWifiSsid) -eq $Ssid) { return $true }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
+function Remove-WlanProfile {
+    <#
+        .SYNOPSIS
+            Deletes any existing WLAN profile for $Ssid, ignoring "not found".
+
+        .DESCRIPTION
+            A stale profile from an earlier run (or one with a mismatched authentication type)
+            makes Windows treat the network as "settings changed" and silently refuse to
+            connect, forcing an interactive re-entry -- callers that are about to (re-)add a
+            profile for this SSID should remove any existing one first.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Ssid)
+
+    Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'delete', 'profile', "name=$Ssid") -AllowedExitCodes @(0, 1) -LogName ("wlan-delete-profile-{0}.log" -f (Get-SafeName -Value $Ssid)) | Out-Null
+}
+
+function Get-WlanProfileSsid {
+    <#
+        .SYNOPSIS
+            Reads the SSID (the <name> element) out of an exported WLAN profile XML file
+            (e.g. one produced by `netsh wlan export profile key=clear`), without needing the
+            profile to be imported first.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)][string]$ProfileXmlPath)
+
+    [xml]$xml = Get-Content -LiteralPath $ProfileXmlPath -Raw
+    $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+    $ns.AddNamespace('w', 'http://www.microsoft.com/networking/WLAN/profile/v1')
+    $node = $xml.SelectSingleNode('/w:WLANProfile/w:SSIDConfig/w:SSID/w:name', $ns)
+    if (-not $node) { $node = $xml.SelectSingleNode('/w:WLANProfile/w:name', $ns) }
+    if (-not $node) { throw "Could not find an SSID name in WLAN profile file: $ProfileXmlPath" }
+    return $node.InnerText
+}
+
+function Import-WlanProfileFile {
+    <#
+        .SYNOPSIS
+            Imports an existing WLAN profile XML file via `netsh wlan add profile`, then
+            optionally connects and waits for it -- shared by Configure-MspWifi.ps1 (the primary
+            network) and Import-AdditionalWifiProfiles.ps1 (secondary networks).
+
+        .DESCRIPTION
+            Importing a profile always succeeds regardless of whether the network is actually in
+            range right now -- `netsh wlan add profile` just registers it for future use. Only
+            the optional connect step needs the network to be reachable, and callers are expected
+            to treat a failed connect differently: fatal for the primary network (later steps need
+            connectivity), non-fatal for secondary networks (a captured customer-site profile is
+            routinely not in range on the bench, and importing/saving it for later is still useful
+            even if it cannot be verified right now).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfileXmlPath,
+        [Parameter(Mandatory = $true)][string]$Ssid,
+        [switch]$Connect,
+        [int]$ConnectTimeoutSeconds = 60
+    )
+
+    Remove-WlanProfile -Ssid $Ssid
+    Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'add', 'profile', "filename=$ProfileXmlPath", 'user=all') -LogName ("wlan-add-profile-{0}.log" -f (Get-SafeName -Value $Ssid)) | Out-Null
+
+    if (-not $Connect) { return $true }
+
+    Invoke-ExternalCommand -FilePath netsh.exe -Arguments @('wlan', 'connect', "name=$Ssid", "ssid=$Ssid") -AllowedExitCodes @(0, 1) -LogName ("wlan-connect-{0}.log" -f (Get-SafeName -Value $Ssid)) | Out-Null
+    return (Wait-WifiConnection -Ssid $Ssid -TimeoutSeconds $ConnectTimeoutSeconds)
 }
 
 function Test-PendingReboot {

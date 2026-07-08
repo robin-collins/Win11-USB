@@ -39,6 +39,7 @@ Describe 'Get-RehearsalStandardScenarioOverlay' {
     It 'returns the exact T10 Standard baseline described in FABLE_TASKS.md' {
         $overlay = Get-RehearsalStandardScenarioOverlay
         $overlay.wipe_repartition_drive | Should -BeTrue
+        $overlay.wipe_minimum_target_disk_gb | Should -Be 60
         $overlay.require_ac_power | Should -BeFalse
         $overlay.msp_wifi_setup.enabled | Should -BeFalse
         $overlay.computer_name_mode | Should -Be 'serial'

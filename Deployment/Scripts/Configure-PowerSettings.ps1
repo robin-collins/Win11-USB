@@ -24,6 +24,8 @@ $acMinutes = [int]$config.power_timeout_ac_minutes
 if ($batteryMinutes -lt 0) { throw 'power_timeout_battery_minutes must be 0 or greater. Use 0 for never.' }
 if ($acMinutes -lt 0) { throw 'power_timeout_ac_minutes must be 0 or greater. Use 0 for never.' }
 
+$disableHibernate = [bool]$config.power_disable_hibernate
+
 $commands = @()
 if ([bool]$config.power_manage_display_timeout) {
     $commands += ,@('monitor-timeout-dc', $batteryMinutes)
@@ -33,7 +35,10 @@ if ([bool]$config.power_manage_sleep_timeout) {
     $commands += ,@('standby-timeout-dc', $batteryMinutes)
     $commands += ,@('standby-timeout-ac', $acMinutes)
 }
-if ([bool]$config.power_manage_hibernate_timeout) {
+# Setting a hibernate timeout is meaningless once hibernation itself is turned off below, and
+# powercfg has been observed to reject /change hibernate-timeout-* once there is no hibernate
+# state left to time out to -- so power_disable_hibernate wins over power_manage_hibernate_timeout.
+if ([bool]$config.power_manage_hibernate_timeout -and -not $disableHibernate) {
     $commands += ,@('hibernate-timeout-dc', $batteryMinutes)
     $commands += ,@('hibernate-timeout-ac', $acMinutes)
 }
@@ -71,6 +76,29 @@ foreach ($command in $commands) {
         })
 }
 
+$hibernateExitCode = $null
+if ($disableHibernate) {
+    if (Test-DeploymentDryRun) {
+        $argumentString = ConvertTo-ProcessArgumentString -Arguments @('/HIBERNATE', 'OFF')
+        Write-DryRunAction -State $state -Step 'PowerSettings' -Action "would run: powercfg.exe $argumentString" -Data ([ordered]@{
+                file_path = 'powercfg.exe'
+                arguments = @('/HIBERNATE', 'OFF')
+            })
+        $hibernateExitCode = 0
+    }
+    else {
+        # Also removes hiberfil.sys and the "Hibernate" option from the shutdown menu, and (since
+        # Fast Startup depends on hibernation being available) implicitly disables Fast Startup.
+        $hibernateResult = Invoke-ExternalCommand -FilePath powercfg.exe -Arguments @('/HIBERNATE', 'OFF') -LogName 'powercfg-hibernate-off.log'
+        $hibernateExitCode = $hibernateResult.exit_code
+    }
+    $results += ,([ordered]@{
+            setting   = 'hibernate'
+            minutes   = $null
+            exit_code = $hibernateExitCode
+        })
+}
+
 # /getactivescheme only queries the currently active power plan; it changes nothing, so
 # -ReadOnly keeps it running for real even in dry-run (Common.ps1, T05) and the summary below
 # reports the machine's genuine active scheme instead of a synthesized blank value.
@@ -81,6 +109,7 @@ $summary = [ordered]@{
     display_timeout_managed = [bool]$config.power_manage_display_timeout
     sleep_timeout_managed = [bool]$config.power_manage_sleep_timeout
     hibernate_timeout_managed = [bool]$config.power_manage_hibernate_timeout
+    hibernate_disabled = $disableHibernate
     active_scheme = ($scheme.stdout -replace '\s+', ' ').Trim()
     results = $results
     timestamp = (Get-Date).ToString('o')
@@ -92,4 +121,4 @@ if ($state) {
 }
 
 Write-StructuredLog -Level Info -Message 'Power settings configured' -Data $summary
-Write-Log -Level Success -Message "Power settings configured: battery $batteryMinutes minute(s), AC $(if ($acMinutes -eq 0) { 'never' } else { "$acMinutes minute(s)" })."
+Write-Log -Level Success -Message "Power settings configured: battery $batteryMinutes minute(s), AC $(if ($acMinutes -eq 0) { 'never' } else { "$acMinutes minute(s)" })$(if ($disableHibernate) { ', hibernation disabled' })."

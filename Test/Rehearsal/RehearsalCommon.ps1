@@ -961,6 +961,12 @@ function Get-RehearsalStandardScenarioOverlay {
 
     return @{
         wipe_repartition_drive = $true
+        # New-RehearsalVm's default -OsDiskGB is 80: below the toolkit-wide production default
+        # of wipe_minimum_target_disk_gb=100 (a real-world safety floor against wiping the
+        # boot/USB media when a client notebook's internal disk driver is missing). Lowering it
+        # here for the rehearsal's synthetic OS disk only -- a real client notebook's internal
+        # disk is expected to clear the production default comfortably.
+        wipe_minimum_target_disk_gb = 60
         # Verified in Deployment\Scripts\Invoke-PreflightChecks.ps1: when Get-CimInstance
         # Win32_Battery finds no battery device at all (the expected case for a Hyper-V VM),
         # the AC-power check is a Warn ("No battery was detected; assuming desktop or
@@ -1500,6 +1506,18 @@ function New-RehearsalMedia {
         }
         if (Test-Path -LiteralPath $mediaDiskPartLogPath -PathType Leaf) {
             Remove-Item -LiteralPath $mediaDiskPartLogPath -Force -ErrorAction SilentlyContinue
+        }
+
+        $mediaDiskCheckScriptPath = Join-Path $mountedRoot $script:DiskCheckScriptFileName
+        $mediaDiskCheckLogPath = Join-Path $mountedRoot $script:DiskCheckLogFileName
+        if ($null -ne $generatedUnattend.DiskCheckScript) {
+            # ASCII, matching Initialize-UsbDeployment.ps1's own write.
+            Set-Content -LiteralPath $mediaDiskCheckScriptPath -Value $generatedUnattend.DiskCheckScript -Encoding ASCII -Force -ErrorAction Stop
+        } elseif (Test-Path -LiteralPath $mediaDiskCheckScriptPath -PathType Leaf) {
+            Remove-Item -LiteralPath $mediaDiskCheckScriptPath -Force -ErrorAction Stop
+        }
+        if (Test-Path -LiteralPath $mediaDiskCheckLogPath -PathType Leaf) {
+            Remove-Item -LiteralPath $mediaDiskCheckLogPath -Force -ErrorAction SilentlyContinue
         }
 
         # Re-validate: pass 1's own validation (inside Initialize-UsbDeployment.ps1) only ever

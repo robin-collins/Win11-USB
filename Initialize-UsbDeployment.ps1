@@ -194,19 +194,22 @@ function Copy-DeploymentFiles {
 
     $sourcePrefix = $resolvedSource + '\'
     $copiedCount = 0
-    $skippedRuntimeCount = 0
+    $skippedExcludedCount = 0
 
-    function Test-RuntimeDeploymentPath {
+    function Test-ExcludedDeploymentPath {
         param([string]$RelativePath)
 
         $topLevel = ($RelativePath -split '[\\/]', 2)[0]
-        return $topLevel -in @('Logs', 'Reports', 'State')
+        # Logs/Reports/State are per-run runtime output, never toolkit input. VHD holds large
+        # local-only Hyper-V rehearsal test media (Test\Rehearsal\Media\ is the intended home;
+        # VHD is excluded here too as a backstop) -- never copy it onto real deployment media.
+        return $topLevel -in @('Logs', 'Reports', 'State', 'VHD')
     }
 
     Get-ChildItem -LiteralPath $SourceDeployment -Recurse -Force -Directory -ErrorAction Stop | ForEach-Object {
         $relativePath = $_.FullName.Substring($sourcePrefix.Length)
-        if (Test-RuntimeDeploymentPath -RelativePath $relativePath) {
-            $skippedRuntimeCount++
+        if (Test-ExcludedDeploymentPath -RelativePath $relativePath) {
+            $skippedExcludedCount++
         } else {
             New-Item -ItemType Directory -Path (Join-Path $TargetDeployment $relativePath) -Force | Out-Null
         }
@@ -214,8 +217,8 @@ function Copy-DeploymentFiles {
 
     Get-ChildItem -LiteralPath $SourceDeployment -Recurse -Force -File -ErrorAction Stop | ForEach-Object {
         $relativePath = $_.FullName.Substring($sourcePrefix.Length)
-        if (Test-RuntimeDeploymentPath -RelativePath $relativePath) {
-            $skippedRuntimeCount++
+        if (Test-ExcludedDeploymentPath -RelativePath $relativePath) {
+            $skippedExcludedCount++
         } else {
             $targetFile = Join-Path $TargetDeployment $relativePath
             $targetFolder = Split-Path -Parent $targetFile
@@ -232,7 +235,7 @@ function Copy-DeploymentFiles {
         }
     }
 
-    Write-Host "Deployment files refreshed at $TargetDeployment ($copiedCount files overwritten or copied; $skippedRuntimeCount runtime items skipped)." -ForegroundColor Green
+    Write-Host "Deployment files refreshed at $TargetDeployment ($copiedCount files overwritten or copied; $skippedExcludedCount runtime/VHD items skipped)." -ForegroundColor Green
 }
 
 function Clear-DeploymentState {
@@ -270,7 +273,10 @@ Write-Host "Deployment folder structure ensured under $UsbRoot" -ForegroundColor
 $deploymentConfig = Get-DeploymentConfig -UsbRoot $sourceRoot
 $ositPassword = Resolve-OsitPasswordForInitialisation -SourceRoot $sourceRoot -UsbRoot $UsbRoot
 $wifiPassword = $null
-if (Test-MspWifiSetupEnabled -Config $deploymentConfig) {
+$sourcePrimaryWifiProfile = Join-Path (Join-Path $sourceRoot 'Deployment\WifiProfiles') $script:PrimaryWifiProfileFileName
+if (Test-Path -LiteralPath $sourcePrimaryWifiProfile -PathType Leaf) {
+    Write-Host "Deployment\WifiProfiles\$script:PrimaryWifiProfileFileName found; the primary WLAN profile it contains already carries its own key, so OSIT_WIFI_PASSWORD is not needed." -ForegroundColor Green
+} elseif (Test-MspWifiSetupEnabled -Config $deploymentConfig) {
     $wifiPassword = Resolve-OsitWifiPasswordForInitialisation -SourceRoot $sourceRoot -UsbRoot $UsbRoot
 }
 $smtpConfig = Get-SmtpConfig -UsbRoot $sourceRoot
@@ -307,6 +313,44 @@ if (-not $SkipCopy) {
     }
     if (Test-Path -LiteralPath $targetDiskPartLog -PathType Leaf) {
         Remove-Item -LiteralPath $targetDiskPartLog -Force -ErrorAction SilentlyContinue
+    }
+
+    $targetDiskCheckScript = Join-Path $UsbRoot $script:DiskCheckScriptFileName
+    $targetDiskCheckLog = Join-Path $UsbRoot $script:DiskCheckLogFileName
+    if ($null -ne $windowsPe.DiskCheckScript) {
+        # ASCII avoids a UTF-8 BOM, which cmd.exe misreads as part of the first command.
+        Set-Content -LiteralPath $targetDiskCheckScript -Value $windowsPe.DiskCheckScript -Encoding ASCII -Force -ErrorAction Stop
+        Write-Host "Pre-wipe disk safety check written to $targetDiskCheckScript" -ForegroundColor Green
+    } elseif (Test-Path -LiteralPath $targetDiskCheckScript -PathType Leaf) {
+        Remove-Item -LiteralPath $targetDiskCheckScript -Force -ErrorAction Stop
+        Write-Host "Removed stale $targetDiskCheckScript because wipe_repartition_drive is disabled." -ForegroundColor Yellow
+    }
+    if (Test-Path -LiteralPath $targetDiskCheckLog -PathType Leaf) {
+        Remove-Item -LiteralPath $targetDiskCheckLog -Force -ErrorAction SilentlyContinue
+    }
+
+    $targetDiskAssertScript = Join-Path $UsbRoot $script:DiskAssertScriptFileName
+    if ($null -ne $windowsPe.DiskAssertScript) {
+        # ASCII avoids a UTF-8 BOM, which cscript.exe misreads as part of the first command.
+        Set-Content -LiteralPath $targetDiskAssertScript -Value $windowsPe.DiskAssertScript -Encoding ASCII -Force -ErrorAction Stop
+        Write-Host "WMI disk assertion script written to $targetDiskAssertScript" -ForegroundColor Green
+    } elseif (Test-Path -LiteralPath $targetDiskAssertScript -PathType Leaf) {
+        Remove-Item -LiteralPath $targetDiskAssertScript -Force -ErrorAction Stop
+        Write-Host "Removed stale $targetDiskAssertScript because wipe_repartition_drive is disabled." -ForegroundColor Yellow
+    }
+
+    $targetDiskDiagScript = Join-Path $UsbRoot $script:DiskDiagScriptFileName
+    if ($null -ne $windowsPe.DiskDiagScript) {
+        # ASCII avoids a UTF-8 BOM, which cscript.exe misreads as part of the first command.
+        Set-Content -LiteralPath $targetDiskDiagScript -Value $windowsPe.DiskDiagScript -Encoding ASCII -Force -ErrorAction Stop
+        Write-Host "On-failure disk diagnostic script written to $targetDiskDiagScript" -ForegroundColor Green
+    } elseif (Test-Path -LiteralPath $targetDiskDiagScript -PathType Leaf) {
+        Remove-Item -LiteralPath $targetDiskDiagScript -Force -ErrorAction Stop
+        Write-Host "Removed stale $targetDiskDiagScript because wipe_repartition_drive is disabled." -ForegroundColor Yellow
+    }
+    $targetDiskDiagLog = Join-Path $UsbRoot $script:DiskDiagLogFileName
+    if (Test-Path -LiteralPath $targetDiskDiagLog -PathType Leaf) {
+        Remove-Item -LiteralPath $targetDiskDiagLog -Force -ErrorAction SilentlyContinue
     }
 
     # Validate what actually landed on the USB against the same config used to generate it,

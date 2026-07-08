@@ -134,26 +134,32 @@ Important `deployment_config.json` options:
 
 - `wipe_repartition_drive`: when `true`, the generated USB `Autounattend.xml` wipes the configured disk and creates the standard OSIT UEFI/GPT layout before installing Windows. Default is `false`.
 - `wipe_repartition_disk_id`: disk number to wipe. Default is `0`.
+- `wipe_minimum_disk_count` / `wipe_minimum_target_disk_gb`: pre-wipe safety check thresholds (default `2` disks, `100` GB) — see "Pre-Wipe Disk Safety Check" below.
+- `wipe_maximum_target_disk_gb` / `wipe_assert_no_existing_partitions` / `wipe_assert_fixed_interface_type` / `wipe_assert_fixed_media_type`: additional WMI-based pre-wipe safety checks (default `4000` GB, `true`, `false`, `false`) — see "Pre-Wipe Disk Safety Check" below.
 - `efi_partition_size_mb`, `msr_partition_size_mb`, `recovery_partition_size_mb`: default to `512`, `16`, and `2048`.
 - `windows_image_name`: image name to install from the USB. Default is `Windows 11 Pro`.
 - `require_ac_power`: fail preflight on battery power for notebooks.
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
-- `msp_wifi_setup`: connects to MSP WiFi SSID `OneSolution` before preflight internet checks. Password comes from `OSIT_WIFI_PASSWORD`. The step is skipped automatically when the device already has internet (for example Ethernet) or has no wireless adapter.
+- `msp_wifi_setup`: connects to MSP WiFi SSID `OneSolution` before preflight internet checks. Password comes from `OSIT_WIFI_PASSWORD`, unless `Deployment\WifiProfiles\Primary.xml` exists, in which case that exported profile is imported directly instead. The step is skipped automatically when the device already has internet (for example Ethernet) or has no wireless adapter.
+- `configure_additional_wifi_profiles` / `additional_wifi_profiles_connect_timeout_seconds`: imports every other WLAN profile XML in `Deployment\WifiProfiles\` (besides `Primary.xml`) after driver installation, verifying each on a best-effort basis, then switches back to the primary network. See "Additional WiFi Profiles" below.
 - `local_deployment_handover`: when `enabled=true`, copies the deployment to `local_path` (default `C:\1S-WIN11`) once network is available and continues the rest of the deployment from there, so the USB can be ejected early. Default is `false`. See "Local Deployment Handover" below.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
 - `configure_power_settings`: sets power timeouts before long-running update and install stages.
-- `power_timeout_battery_minutes`: defaults to `60`, meaning display/sleep/hibernate after 1 hour on battery.
+- `power_timeout_battery_minutes`: defaults to `60`, meaning display/sleep after 1 hour on battery.
 - `power_timeout_ac_minutes`: defaults to `0`, meaning never while plugged in.
+- `power_disable_hibernate`: defaults to `true`. Runs `powercfg.exe /HIBERNATE OFF`, which also disables Fast Startup (it depends on hibernation). Takes priority over `power_manage_hibernate_timeout`.
 - `osit_local_admin_username`: defaults to `OSIT`. This is the always-present primary local admin.
 - `primary_setup_username`: defaults to `OSIT`.
 - `final_resultant_user`: user profile whose Desktop should represent the final technician-ready desktop. Defaults to `OSIT`.
 - `additional_local_users`: creates optional extra local accounts. Each entry supports `username`, `full_name`, `description`, `groups`, `password_mode`, `password_never_expires`, `enabled`, and `primary_setup_user`.
+- `configure_system_tweaks`: runs bloatware removal, taskbar/Explorer tweaks, and hardening toggles (see `system_tweaks` in `deployment_config.example.json.md`) after app installation, before desktop item cleanup.
 - `configure_desktop_items`: runs final desktop cleanup after app installation.
 - `desktop_items`: controls Public Desktop and final user Desktop desired state.
 - `datto_rmm_site_id_uuid`: optional Datto RMM site UUID. When present, Datto installs after hostname, Windows Updates, drivers, and winget, but before local USB apps.
 - `datto_rmm_install_arguments`: optional arguments passed to the Datto installer.
 - `datto_rmm_required`: when `true`, fail if the installer completes but Datto/CentraStage is not detected.
+- `datto_rmm_install_timeout_seconds`: defaults to `300`. The installer process is known to sometimes remain resident (background check-in/self-update) after the agent is actually installed and running, so the toolkit polls for the agent alongside the process handle and stops waiting as soon as either happens -- it does not just block on the process exiting.
 - `install_winget_apps`, `install_local_apps`, `install_offline_drivers`: enable or skip those phases.
 - `winget_bootstrap`: when `true` and winget is not yet available at first logon, the toolkit re-registers App Installer and falls back to `Repair-WinGetPackageManager` from the `Microsoft.WinGet.Client` module before installing apps.
 - `stop_before_domain_join`: documents the intended stopping point. The scripts do not perform customer identity joins.
@@ -267,16 +273,34 @@ The generated file:
 - creates the `OSIT` local administrator.
 - auto-logs on once and starts `Deployment\Scripts\Start-Deployment.ps1` from the USB found by label.
 
-When `wipe_repartition_drive` is `true`, `Initialize-UsbDeployment.ps1` writes two partitioning artifacts:
+When `wipe_repartition_drive` is `true`, `Initialize-UsbDeployment.ps1` writes six partitioning artifacts:
 
+- `OSIT-DiskCheck.cmd` at the USB root: a pre-wipe safety check (see "Pre-Wipe Disk Safety Check" below).
+- `OSIT-DiskAssert.vbs` at the USB root: WMI-based disk assertions, invoked by `OSIT-DiskCheck.cmd` (see "Pre-Wipe Disk Safety Check" below).
+- `OSIT-DiskDiag.vbs` at the USB root: on-failure diagnostic, invoked by `OSIT-DiskCheck.cmd` (see "Pre-Wipe Disk Safety Check" below).
 - `OSIT-DiskPart.txt` at the USB root: the full diskpart script (`select disk`, `clean`, `convert gpt`, partition creation, WinRE type and attributes).
-- A short `windowsPE` RunSynchronous command inside the generated `Autounattend.xml` that scans drive letters for `OSIT-DiskPart.txt`, runs `diskpart /s` against it, and writes diskpart output to `OSIT-DiskPart.log` at the USB root for diagnostics.
+- Two short `windowsPE` RunSynchronous commands inside the generated `Autounattend.xml`, in order: Order 1 scans drive letters for `OSIT-DiskCheck.cmd` and runs it; Order 2 scans drive letters for `OSIT-DiskPart.txt`, runs `diskpart /s` against it, and writes diskpart output to `OSIT-DiskPart.log` at the USB root for diagnostics. Order 2 only runs if Order 1 exits `0`.
 
-The diskpart script cannot be embedded in the answer file directly because the unattend schema caps each RunSynchronous command at 259 characters. The script assigns temporary letters `S` and `W` (never `C`, which WinPE frequently gives to the USB stick when the target disk is blank) and uses `noerr` so a letter collision cannot abort partition creation. Windows is installed to disk `wipe_repartition_disk_id`, partition 3, by ID rather than by drive letter.
+Neither script can be embedded in the answer file directly because the unattend schema caps each RunSynchronous command at 259 characters. Each `windowsPE` command only locates and runs its own USB-root script file. The diskpart script assigns temporary letters `S` and `W` (never `C`, which WinPE frequently gives to the USB stick when the target disk is blank) and uses `noerr` so a letter collision cannot abort partition creation. Windows is installed to disk `wipe_repartition_disk_id`, partition 3, by ID rather than by drive letter.
 
-If partitioning fails, read `OSIT-DiskPart.log` on the USB root to see exactly which diskpart command stopped.
+If partitioning fails, read `OSIT-DiskPart.log` on the USB root to see exactly which diskpart command stopped. If Windows Setup stops before wiping the disk at all, read `OSIT-DiskCheck.log` on the USB root first.
 
 Treat `wipe_repartition_drive=true` as destructive. It is intended for standardised deployments where disk 0 is the target OS disk.
+
+### Pre-Wipe Disk Safety Check
+
+A bare Windows image with a missing boot-critical storage/RAID/NVMe driver can leave WinPE seeing only one fixed disk — the USB/boot media itself — which would then resolve to "disk 0" and get wiped by `OSIT-DiskPart.txt` instead of the client's internal disk. `OSIT-DiskCheck.cmd` runs first (Order 1, before `OSIT-DiskPart.txt`'s Order 2) to guard against exactly this:
+
+1. Loads every `.inf` driver under the USB's `Deployment\Drivers\Storage\<Vendor>` folders with `drvload`, giving a missing storage driver a chance to make the real internal disk visible.
+2. Re-enumerates disks with `diskpart list disk`.
+3. Refuses to continue (`exit /b 1`, which makes Windows Setup itself abort the `windowsPE` pass with an error, before disk 0 is ever touched) unless at least `wipe_minimum_disk_count` disks are visible **and** `wipe_repartition_disk_id` is at least `wipe_minimum_target_disk_gb`.
+4. Runs the companion `OSIT-DiskAssert.vbs` script, which checks properties of the target disk itself via WMI (`Win32_DiskDrive`) that `diskpart list disk` text has no columns for: exact size ceiling (`wipe_maximum_target_disk_gb`), existing partition count (`wipe_assert_no_existing_partitions`), interface type (`wipe_assert_fixed_interface_type`), and media type (`wipe_assert_fixed_media_type`). A non-zero exit here fails `OSIT-DiskCheck.cmd` the same way step 3 does. The interface/media-type checks are off by default because real RAID/NVMe controllers can report unexpected values and a false positive would abort a legitimate deployment.
+
+If any of steps 3, 4 fails, `OSIT-DiskCheck.cmd` runs the companion `OSIT-DiskDiag.vbs` script before exiting: it gathers, via WMI, the notebook's own make/model (`Win32_ComputerSystem`) and serial number (`Win32_BIOS`), every disk WinPE can currently see (`Win32_DiskDrive` — normally just the USB stick in this failure scenario), and every PnP device with no working driver (`Win32_PnPEntity` where `ConfigManagerErrorCode <> 0`, whose `PNPDeviceID` `VEN_`/`DEV_` tokens identify exactly which storage controller chipset needs a driver). This is both saved to `OSIT-DiskDiag.log` at the USB root and shown immediately as an on-screen dialog, so a technician does not have to dig through log files to find out what is missing or which machine they are looking at.
+
+Every step is logged to `OSIT-DiskCheck.log` at the USB root: which drivers were loaded, the full `diskpart list disk` output, the disk count and target size it detected, the `OSIT-DiskAssert.vbs` output, and the pass/fail reason. If Windows Setup stops with an error before any disk activity, read this file first (or `OSIT-DiskDiag.log` for the make/model/serial and driver-less-device summary).
+
+Drop boot-critical storage/RAID/NVMe driver packages (`.inf` plus their `.sys`/`.cat`/`.dll` files) under `Deployment\Drivers\Storage\<Vendor>` — this is a separate, WinPE-time convention from the post-install `Deployment\Drivers\<Manufacturer>\<Model>` and `Deployment\Drivers\Network\<Vendor>` folders documented below, because `drvload` runs before Windows itself is even installed. Default vendor folders created on the USB: `Deployment\Drivers\Storage\Intel`, `Deployment\Drivers\Storage\AMD`, `Deployment\Drivers\Storage\Generic`. An empty or missing folder is skipped, same as the Network vendor folders.
 
 Validate the repository template:
 
@@ -301,6 +325,8 @@ To let the validator install the ADK packages with winget when the schema DLL is
 This uses winget IDs `Microsoft.WindowsADK` and `Microsoft.WindowsADK.WinPEAddon`.
 
 The `windowsPE` pass is the Windows Setup phase that runs inside Windows PE before the installed operating system is applied. This toolkit uses it only in generated answer files when `wipe_repartition_drive=true`, because that is where disk wipe, GPT partitioning, and image install target settings must be applied.
+
+The same `windowsPE` block also carries a `UserData/ProductKey` matching `windows_image_name` (Microsoft's publicly documented generic KMS client setup key for that edition, from `Get-KmsClientSetupKey` in `UnattendGeneration.ps1`) so Windows Setup's interactive "Enter your product key" page never blocks an unattended run. This exists mainly for Hyper-V rehearsal VMs: a real notebook's firmware normally carries an OEM digital license that Windows Setup detects on its own and skips that page for, but a VM has no such firmware entry and otherwise sits there waiting for a technician to click "I don't have a product key." A real machine's genuine OEM firmware entitlement still takes over activation after install either way.
 
 If Windows Setup fails before wiping the disk with `0x80004005 - 0x40030`, regenerate the USB files with `Initialize-UsbDeployment.ps1` and validate the USB-root answer file. Older generated answer files embedded the entire diskpart script in the `windowsPE` command, exceeding the 259-character unattend `Path` limit and causing exactly this error; regenerating produces the current short command plus the USB-root `OSIT-DiskPart.txt` script file.
 
@@ -399,6 +425,18 @@ Every remaining step — computer name, local admin, power settings, Windows Upd
 If no network connection is available yet when `LocalHandover` runs, the step is skipped (not failed) and the deployment simply continues entirely from the USB, same as with `local_deployment_handover.enabled=false`.
 
 This is disabled by default. Enable it once you are ready to have technicians eject the USB partway through a deployment and reuse it on the next device.
+
+## Additional WiFi Profiles
+
+`Deployment\WifiProfiles\` holds WLAN profile XML files exported via `netsh wlan export profile key=clear` (which preserves the network's key in plaintext inside the file, `protected=false`, so the profile actually works when imported on a different machine).
+
+- `Primary.xml`, if present, is what `MspWifiSetup` imports for the primary network, instead of building a profile from `msp_wifi_setup`'s `ssid`/`password_env_var`/`authentication`/`encryption` fields. No `OSIT_WIFI_PASSWORD` lookup happens in that case — `Initialize-UsbDeployment.ps1` detects the file and skips prompting for the password entirely.
+- Every other `.xml` file in the folder is a secondary profile. The `AdditionalWifiProfiles` step runs after `ModelDrivers` and before `WingetApps`/`DattoRmm`/`LocalApps` — late enough that Windows Update has already finished, early enough that nothing yet depends on sustained network access for downloads, so briefly hopping between networks here does not interrupt anything:
+  1. Imports and saves every secondary profile (`netsh wlan add profile`), which always succeeds regardless of whether the network is actually in range right now.
+  2. Attempts to connect to each one and waits up to `additional_wifi_profiles_connect_timeout_seconds`. A profile that cannot connect within that time is left imported and saved anyway, and this is logged as expected, not a failure — secondary profiles are typically captured ahead of time for a customer's own site network, which usually is not in range on the bench.
+  3. Switches back to (or reconnects to) the primary network and confirms it, so every later step still has real connectivity. Only failing to reconnect to primary **and** having no other connectivity (e.g. Ethernet) at all is treated as fatal.
+
+Treat everything in `Deployment\WifiProfiles\` as a secret: `key=clear` means these files contain real, plaintext network passwords. The folder's contents are gitignored the same way `.env` is — only `.gitkeep` is committed.
 
 ## SMTP Email Notifications
 

@@ -424,6 +424,10 @@ function Invoke-DeploymentStep {
             if ([bool]$Config.install_offline_drivers) { & (Join-Path $PSScriptRoot 'Install-ModelDrivers.ps1') -UsbRoot $UsbRoot -StatePath $StatePath -NonInteractive:$NonInteractive }
             else { Write-Log -Level Info -Message 'Offline driver installation is disabled by config.' }
         }
+        'AdditionalWifiProfiles' {
+            if ([bool]$Config.configure_additional_wifi_profiles) { & (Join-Path $PSScriptRoot 'Import-AdditionalWifiProfiles.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
+            else { Write-Log -Level Info -Message 'Additional WiFi profile import is disabled by config.' }
+        }
         'WingetApps' {
             if ([bool]$Config.install_winget_apps) { & (Join-Path $PSScriptRoot 'Install-WingetApps.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
             else { Write-Log -Level Info -Message 'winget app installation is disabled by config.' }
@@ -432,6 +436,10 @@ function Invoke-DeploymentStep {
         'LocalApps' {
             if ([bool]$Config.install_local_apps) { & (Join-Path $PSScriptRoot 'Install-LocalApps.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
             else { Write-Log -Level Info -Message 'Local app installation is disabled by config.' }
+        }
+        'SystemTweaks' {
+            if ([bool]$Config.configure_system_tweaks) { & (Join-Path $PSScriptRoot 'Set-SystemTweaks.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
+            else { Write-Log -Level Info -Message 'System tweaks configuration is disabled by config.' }
         }
         'DesktopItems' {
             if ([bool]$Config.configure_desktop_items) { & (Join-Path $PSScriptRoot 'Configure-DesktopItems.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }

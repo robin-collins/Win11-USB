@@ -11,6 +11,12 @@ The active deployment script merges this config with built-in defaults. Values i
 | `minimum_free_space_gb` | number | `25` | Minimum free space required on the installed Windows system drive before deployment work continues. Preflight fails if the system drive is below this value. |
 | `wipe_repartition_drive` | boolean | `false` | When `true`, `Initialize-UsbDeployment.ps1` generates a destructive `Autounattend.xml` that wipes the configured disk and creates the standard GPT/UEFI layout. |
 | `wipe_repartition_disk_id` | number | `0` | Disk number to wipe when `wipe_repartition_drive` is `true`. Disk `0` is the normal internal OS disk target, but confirm hardware layout before enabling. |
+| `wipe_minimum_disk_count` | number | `2` | Safety check: the generated USB refuses to wipe unless at least this many fixed disks are visible in WinPE (the USB/boot media plus at least one internal disk). Guards against a missing storage driver leaving only the boot media visible. |
+| `wipe_minimum_target_disk_gb` | number | `100` | Safety check: the generated USB refuses to wipe `wipe_repartition_disk_id` unless it is at least this many GB. Guards against a missing storage driver making the target disk resolve to the small USB/boot media instead of the internal disk. |
+| `wipe_maximum_target_disk_gb` | number | `4000` | Safety check: the generated USB refuses to wipe `wipe_repartition_disk_id` if it is larger than this many GB. `0` disables the check. Catches accidentally targeting a large network-attached or virtual disk. |
+| `wipe_assert_no_existing_partitions` | boolean | `true` | Safety check: refuses to wipe a target disk that already has partitions on it. Disable for re-imaging scenarios where the target disk is expected to already be partitioned. |
+| `wipe_assert_fixed_interface_type` | boolean | `false` | Safety check: refuses to wipe unless the target disk's WMI `InterfaceType` is `IDE` or `SCSI`. Off by default -- real RAID/NVMe controllers can report unexpected values, and a false positive here would abort a legitimate deployment. |
+| `wipe_assert_fixed_media_type` | boolean | `false` | Safety check: refuses to wipe unless the target disk's WMI `MediaType` is `Fixed hard disk media`. Off by default for the same reason as `wipe_assert_fixed_interface_type`. |
 | `efi_partition_size_mb` | number | `512` | EFI System Partition size in MB. Used only when `wipe_repartition_drive` is `true`. |
 | `msr_partition_size_mb` | number | `16` | Microsoft Reserved partition size in MB. Used only when `wipe_repartition_drive` is `true`. |
 | `recovery_partition_size_mb` | number | `2048` | Windows Recovery partition size in MB. Used only when `wipe_repartition_drive` is `true`. |
@@ -42,6 +48,19 @@ The active deployment script merges this config with built-in defaults. Values i
 
 The WiFi password is not stored in JSON. `Initialize-UsbDeployment.ps1` reads `OSIT_WIFI_PASSWORD` from the environment or `.env`, then writes it to the USB-root `.env` so the target machine can connect before internet-dependent stages.
 
+### WiFi profile files (Deployment\WifiProfiles\)
+
+An alternative to `msp_wifi_setup`'s discrete `ssid`/`password_env_var`/`authentication`/`encryption` fields: drop WLAN profile XML files exported via `netsh wlan export profile key=clear` into `Deployment\WifiProfiles\`.
+
+- `Primary.xml`, if present, is imported directly for the primary network instead of building a profile from `msp_wifi_setup`'s fields -- no `OSIT_WIFI_PASSWORD` lookup happens in that case, since the exported file already carries its own key. `msp_wifi_setup.ssid` should still match the SSID inside `Primary.xml`; a mismatch produces a warning but the file's own SSID wins.
+- Every other `.xml` file in the folder is a secondary profile, imported later by a dedicated `AdditionalWifiProfiles` step (see "Additional WiFi Profiles" below) -- typically a customer's own site network, captured ahead of time and not necessarily in range during deployment.
+- `key=clear` means these files contain **plaintext WiFi passwords**. `Deployment\WifiProfiles\*` is gitignored (same treatment as `.env`) -- never commit real exported profiles.
+
+| Key | Type | Example | Meaning |
+| --- | --- | --- | --- |
+| `configure_additional_wifi_profiles` | boolean | `true` | Enables the `AdditionalWifiProfiles` step, which imports every secondary profile in `Deployment\WifiProfiles\` (everything except `Primary.xml`). |
+| `additional_wifi_profiles_connect_timeout_seconds` | number | `20` | Per-profile best-effort connection-verification timeout. A profile that cannot connect within this time is still imported and saved -- this is expected for a network not currently in range, not a failure. |
+
 ## Computer Name
 
 | Key | Type | Example | Meaning |
@@ -60,9 +79,10 @@ If a rename is required, the toolkit records state, registers resume, and reboot
 | `power_timeout_ac_minutes` | number | `0` | Timeout in minutes while plugged in. `0` means never. |
 | `power_manage_display_timeout` | boolean | `true` | Applies the timeout values to display-off settings. |
 | `power_manage_sleep_timeout` | boolean | `true` | Applies the timeout values to sleep/standby settings. |
-| `power_manage_hibernate_timeout` | boolean | `true` | Applies the timeout values to hibernate settings. |
+| `power_manage_hibernate_timeout` | boolean | `true` | Applies the timeout values to hibernate settings. Ignored when `power_disable_hibernate` is `true` (nothing left to time out to). |
+| `power_disable_hibernate` | boolean | `true` | Runs `powercfg.exe /HIBERNATE OFF`, fully disabling hibernation (removes `hiberfil.sys` and the "Hibernate" option from the shutdown menu) and, as a side effect, disables Fast Startup (which depends on hibernation being available). Takes priority over `power_manage_hibernate_timeout`. |
 
-The default means display, sleep, and hibernate after one hour on battery and never while plugged in.
+The default means display and sleep timeout after one hour on battery and never while plugged in, with hibernation disabled entirely.
 
 ## Local Users
 
@@ -90,6 +110,34 @@ The OSIT password is not stored in this JSON file. `Initialize-UsbDeployment.ps1
 | `password_never_expires` | boolean | `true` | Sets the local account password-never-expires flag. |
 | `enabled` | boolean | `false` | Disabled entries are ignored. |
 | `primary_setup_user` | boolean | `false` | Marks this user as the preferred setup user if `primary_setup_username` is not explicitly set. |
+
+## System Tweaks
+
+Runs after app installation, before desktop item cleanup, as the logged-on OSIT session -- so every setting below applies directly to the real interactive profile driving the deployment.
+
+| Key | Type | Example | Meaning |
+| --- | --- | --- | --- |
+| `configure_system_tweaks` | boolean | `true` | Enables the bloatware removal / taskbar / hardening tweaks below. |
+| `system_tweaks` | object | see below | Individual tweak toggles. |
+
+### system_tweaks keys
+
+| Key | Type | Example | Meaning |
+| --- | --- | --- | --- |
+| `remove_bloatware` | array of strings | `[ "RemoveBingSearch", "RemoveCortana", "RemoveZuneVideo", "RemoveStepsRecorder", "RemoveGetStarted", "RemoveWordPad", "RemoveXboxApps" ]` | Windows Appx/capability packages to remove. Valid ids are the keys `Get-BloatwareSelectors` (`Deployment\Scripts\Common.ps1`) returns; removing an id not present on the image is a harmless no-op. |
+| `disable_widgets` | boolean | `true` | Disables the Widgets (news and interests) taskbar button via policy. |
+| `left_align_taskbar` | boolean | `true` | Left-aligns the Windows 11 taskbar instead of centering it. |
+| `disable_bing_search_suggestions` | boolean | `true` | Disables Bing web search suggestions in File Explorer's search box. |
+| `taskbar_search_mode` | string | `"Hide"` | Taskbar search box display. Valid values: `Hide`, `Icon`, `Box`, `Label`. Restarts Explorer when set to anything other than `Box` so the change is immediately visible. |
+| `show_end_task_in_taskbar` | boolean | `true` | Adds "End task" to the taskbar's right-click menu on running apps. |
+| `launch_file_explorer_to_this_pc` | boolean | `true` | Opens File Explorer to This PC instead of Quick Access. |
+| `enable_long_paths` | boolean | `true` | Sets `LongPathsEnabled`, lifting the 260-character `MAX_PATH` limit for apps that opt in. |
+| `harden_system_drive_acl` | boolean | `true` | Removes the Authenticated Users group's write access to `C:\`. |
+| `allow_powershell_scripts` | boolean | `true` | Sets the machine PowerShell execution policy to `RemoteSigned`. |
+| `disable_sticky_keys` | boolean | `true` | Disables the 5x-Shift StickyKeys accessibility shortcut prompt. |
+| `start_folders` | array of strings | `[ "Documents", "Downloads", "FileExplorer", "Network", "Pictures", "Settings" ]` | Folders pinned next to the Start menu's power button. Valid names: `Documents`, `Downloads`, `FileExplorer`, `Music`, `Network`, `PersonalFolder`, `Pictures`, `Settings`, `Videos` (spaces are ignored, so `"File Explorer"` also works). |
+
+The specific commands behind `remove_bloatware` and `start_folders` (package/capability selectors, the Start-folder registry blob) are adapted from [cschneegans/unattend-generator](https://github.com/cschneegans/unattend-generator), vendored as a reference-only git submodule at `External\unattend-generator` -- see `Build-UnattendGeneratorLibrary.ps1`'s header for why this toolkit does not call that project's compiled library at runtime for settings this simple.
 
 ## Desktop Items
 
@@ -150,6 +198,7 @@ If `PSWindowsUpdate` cannot be used, the script falls back to Windows Update COM
 | `datto_rmm_site_id_uuid` | string | `""` | Optional Datto site UUID. Blank means skip Datto RMM install. If present, preflight validates UUID format. |
 | `datto_rmm_install_arguments` | string | `""` | Optional arguments passed to the downloaded Datto installer. |
 | `datto_rmm_required` | boolean | `true` | If `true`, fail when the installer completes but Datto/CentraStage is not detected. |
+| `datto_rmm_install_timeout_seconds` | number | `300` | Maximum time to wait for the installer. The installer is known to sometimes stay running after the agent is already installed, so the toolkit polls for the agent's presence alongside the process and stops waiting as soon as either is true, rather than only waiting for the process to exit. |
 
 Datto installs after hostname, Windows Updates, model drivers, and winget apps, but before local USB apps.
 
