@@ -66,3 +66,5 @@ Test/Rehearsal/VhdBootVms/
 External/unattend-generator/bin/
 External/unattend-generator/obj/
 External/unattend-generator/publish/
+
+unattended_generator_feature_list_bookmarked.txt
