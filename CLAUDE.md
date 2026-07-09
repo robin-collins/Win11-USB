@@ -9,6 +9,12 @@ A Windows 11 Pro USB deployment toolkit for technician-led notebook imaging. It 
 ## Commands
 
 ```powershell
+# One-time setup on a fresh machine: PowerShell 7, a .NET SDK covering
+# External\unattend-generator's TargetFrameworks, the submodule content, and the
+# PSScriptAnalyzer/Pester modules the commands below assume are already present.
+.\Install-Dependencies.ps1
+.\Install-Dependencies.ps1 -IncludeHyperV -IncludeAdk   # also Tier 1 rehearsal + full XSD validation (heavier, optional)
+
 # Lint (zero findings expected)
 Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
 Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1

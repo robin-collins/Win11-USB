@@ -16,6 +16,8 @@ This toolkit ships a three-tier testing strategy (see `FABLE_TASKS.md` for the f
 
 Tiers are cumulative in confidence, not a substitute for each other: passing Tier 3 does not mean a dry run would succeed, and a clean dry run does not prove the machine actually reboots and resumes correctly under Windows Setup.
 
+On a fresh machine, run `.\Install-Dependencies.ps1` first — it installs/verifies PowerShell 7, a .NET SDK covering `External\unattend-generator`'s target frameworks (Tier 3's `Build-UnattendGeneratorLibrary.ps1` needs this), that submodule's own content, and the Pester/PSScriptAnalyzer modules every tier below assumes are already present. Pass `-IncludeHyperV` and/or `-IncludeAdk` for Tier 1's Hyper-V feature and full XSD schema validation — both are heavier (a reboot, and a multi-GB download respectively) so neither installs by default.
+
 ---
 
 ## Tier 3 — CI (`Tests/Unit`, `PSScriptAnalyzerSettings.psd1`, `Validate-Unattend.ps1 -Ci`)
