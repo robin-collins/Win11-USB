@@ -25,6 +25,7 @@ $script:DiskPartScriptFileName = 'OSIT-DiskPart.txt'
 $script:DiskPartLogFileName = 'OSIT-DiskPart.log'
 $script:DiskCheckScriptFileName = 'OSIT-DiskCheck.cmd'
 $script:DiskCheckLogFileName = 'OSIT-DiskCheck.log'
+$script:DiskCheckOkFileName = 'OSIT-DiskCheck.ok'
 $script:DiskAssertScriptFileName = 'OSIT-DiskAssert.vbs'
 $script:DiskDiagScriptFileName = 'OSIT-DiskDiag.vbs'
 $script:DiskDiagLogFileName = 'OSIT-DiskDiag.log'
@@ -246,13 +247,17 @@ function New-DiskCheckScript {
             <Vendor> folders via drvload, giving a missing storage driver a chance to make the
             real internal disk visible, (2) re-enumerates disks with diskpart, and (3) refuses
             to continue (exit /b 1) unless at least $MinDiskCount disks are visible AND the
-            configured target disk is at least $MinTargetDiskGb. A non-zero exit here makes
-            Windows Setup itself abort the windowsPE pass with an error, before Order=2's
-            OSIT-DiskPart.txt can run -- the same fail-stop behaviour the rest of this toolkit
-            uses for critical prerequisite failures. Every failure branch (this script's own
-            checks and OSIT-DiskAssert.vbs's) runs OSIT-DiskDiag.vbs (New-DiskDiagnosticScript)
-            first, which both saves and shows on screen the machine's make/model/serial and
-            exactly which storage controller has no working driver.
+            configured target disk is at least $MinTargetDiskGb, and only then writes
+            OSIT-DiskCheck.ok. Order=2's own RunSynchronous command line (built in
+            New-WindowsPeArtifacts) requires that file to exist before it will run diskpart at
+            all -- confirmed necessary in the field, where a machine failed this exact check
+            (correctly: the USB stick had enumerated as the configured disk ID) and Windows Setup
+            still ran Order=2's diskpart wipe anyway, destroying the USB's own partitions. A
+            non-zero exit from this script is not sufficient on its own to stop Windows Setup from
+            continuing to Order=2. Every failure branch (this script's own checks and
+            OSIT-DiskAssert.vbs's) runs OSIT-DiskDiag.vbs (New-DiskDiagnosticScript) first, which
+            both saves and shows on screen the machine's make/model/serial and exactly which
+            storage controller has no working driver.
 
         .NOTES
             The disk-count/target-size FOR /F parsing has been reproduced and confirmed against
@@ -263,7 +268,11 @@ function New-DiskCheckScript {
             relying on this for a release: check OSIT-DiskCheck.log on the rehearsal media/
             artifacts for the disk count and target size it actually detected. Also note
             findstr.exe is NOT reliably present in a plain Windows Setup WinPE image -- do not
-            reintroduce a dependency on it here.
+            reintroduce a dependency on it here. Confirmed on real hardware (not just the VM
+            rehearsal, where the target disk happens to be blank) that disk enumeration order is
+            not guaranteed: a machine with an existing OEM Windows install can still enumerate the
+            USB boot media as disk 0, which is exactly the failure mode this check plus the
+            OSIT-DiskCheck.ok gate exist to catch and refuse to wipe.
     #>
     param(
         [int]$DiskId,
@@ -284,6 +293,11 @@ function New-DiskCheckScript {
         "set TARGETDISK=$DiskId",
         "set MINDISKS=$MinDiskCount",
         "set MINGB=$MinTargetDiskGb",
+        "set OKFILE=%OSITDRIVE%\$script:DiskCheckOkFileName",
+        '',
+        # A prior run leaving this behind (or Windows Setup somehow re-running Order 1) must never
+        # let a fresh failure be masked by a stale pass -- always start from "not OK".
+        'del "%OKFILE%" >nul 2>&1',
         '',
         'echo OSIT-DiskCheck starting> "%LOGFILE%"',
         # A trailing numeric variable (0-9) directly touching ">>" is misparsed by cmd.exe as a
@@ -382,6 +396,12 @@ function New-DiskCheckScript {
         ')',
         '',
         'echo PASS: %DISKCOUNT% disk^(s^) visible; disk %TARGETDISK% is %TARGETSIZEGB% GB. Proceeding with wipe.>> "%LOGFILE%"',
+        # Order 2's own command line requires this file to exist before it will run diskpart at
+        # all -- confirmed necessary in the field: a machine whose disk-check FAILED here (this
+        # exact popup/log) still had its USB stick wiped, meaning Windows Setup does not reliably
+        # abort the windowsPE pass just because Order 1 exited non-zero. This sentinel makes the
+        # gate self-enforced instead of depending on Setup's own error handling.
+        'echo OK> "%OKFILE%"',
         'exit /b 0'
     ) -join "`r`n"
 }
@@ -458,15 +478,18 @@ function New-WindowsPeArtifacts {
 
     # The unattend schema caps RunSynchronousCommand Path at 259 characters, so both the disk
     # safety check and the diskpart wipe ship as USB-root files, and each of these commands only
-    # locates the USB (by the presence of its own marker file) and runs it. Order=1 runs the
-    # safety check (and, via its own non-zero exit, aborts Windows Setup entirely before disk 0
-    # is ever touched) strictly before Order=2's diskpart wipe.
+    # locates the USB (by the presence of its own marker file) and runs it.
     $diskCheckCommandLine = 'cmd.exe /c for %d in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do @if exist %d:\{0} (call %d:\{0} %d:)' -f $script:DiskCheckScriptFileName
     if ($diskCheckCommandLine.Length -gt 259) {
         throw "Generated windowsPE disk-check RunSynchronous command is $($diskCheckCommandLine.Length) characters; the unattend Path limit is 259."
     }
 
-    $diskPartCommandLine = 'cmd.exe /c for %d in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do @if exist %d:\{0} (diskpart /s %d:\{0} > %d:\{1} 2>&1)' -f $script:DiskPartScriptFileName, $script:DiskPartLogFileName
+    # Order=2 requires OSIT-DiskCheck.ok (written by Order=1's script only on success) in addition
+    # to the diskpart script itself -- confirmed necessary in the field, where Order=2's diskpart
+    # wipe still ran against a disk that Order=1 had just failed its safety check on, wiping the
+    # USB stick itself. Windows Setup's own windowsPE-pass error handling cannot be trusted alone
+    # to stop Order=2 from running after Order=1 exits non-zero.
+    $diskPartCommandLine = 'cmd.exe /c for %d in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do @if exist %d:\{0} if exist %d:\{1} (diskpart /s %d:\{1} > %d:\{2} 2>&1)' -f $script:DiskCheckOkFileName, $script:DiskPartScriptFileName, $script:DiskPartLogFileName
     if ($diskPartCommandLine.Length -gt 259) {
         throw "Generated windowsPE RunSynchronous command is $($diskPartCommandLine.Length) characters; the unattend Path limit is 259."
     }
@@ -493,7 +516,7 @@ function New-WindowsPeArtifacts {
         </RunSynchronousCommand>
         <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>2</Order>
-          <Description>Wipe disk $diskId with USB-root $script:DiskPartScriptFileName and create OSIT Windows 11 UEFI partition layout</Description>
+          <Description>If Order 1 wrote $script:DiskCheckOkFileName, wipe disk $diskId with USB-root $script:DiskPartScriptFileName and create OSIT Windows 11 UEFI partition layout</Description>
           <Path><![CDATA[$diskPartCommandLine]]></Path>
         </RunSynchronousCommand>
       </RunSynchronous>

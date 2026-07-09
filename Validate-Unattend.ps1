@@ -561,6 +561,18 @@ function Invoke-UnattendValidation {
                 Add-ValidationResult -Status Fail -Check 'DiskPart script reference' -Message 'RunSynchronous command does not reference USB-root OSIT-DiskPart.txt with diskpart /s.'
             }
 
+            # Confirmed in the field: Windows Setup does not reliably abort the windowsPE pass
+            # just because Order 1 (the disk-check) exits non-zero -- a machine that failed this
+            # exact check still had Order 2 run diskpart against it, wiping the USB stick. Order 2
+            # must independently require the OSIT-DiskCheck.ok sentinel that Order 1 only writes
+            # on success, not just rely on Windows Setup's own error handling.
+            if ($diskPartRunSync -and $diskPartRunSync -match 'OSIT-DiskCheck\.ok') {
+                Add-ValidationResult -Status Pass -Check 'DiskPart gated on disk-check success' -Message 'RunSynchronous command requires the OSIT-DiskCheck.ok sentinel before running diskpart, instead of relying solely on Order 1''s exit code.'
+            }
+            else {
+                Add-ValidationResult -Status Fail -Check 'DiskPart gated on disk-check success' -Message 'RunSynchronous command does not require OSIT-DiskCheck.ok -- Order 2 could run diskpart even if Order 1''s disk-check failed.'
+            }
+
             $diskCheckScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskCheckScriptFileName
             if (Test-Path -LiteralPath $diskCheckScriptPath -PathType Leaf) {
                 Add-ValidationResult -Status Pass -Check 'Disk-check script file' -Message "Companion disk-check script found: $diskCheckScriptPath"
@@ -568,7 +580,7 @@ function Invoke-UnattendValidation {
 
                 $minDiskCount = [int](Get-ConfigProperty -Config $config -Name 'wipe_minimum_disk_count' -Default 2)
                 $minTargetDiskGb = [int](Get-ConfigProperty -Config $config -Name 'wipe_minimum_target_disk_gb' -Default 100)
-                foreach ($fragment in @('drvload', 'Deployment\Drivers\Storage', 'diskpart', "set TARGETDISK=$expectedDiskId", "set MINDISKS=$minDiskCount", "set MINGB=$minTargetDiskGb", 'OSIT-DiskAssert.vbs', 'errorlevel 1', 'DIAGSCRIPT', 'DIAGLOG', 'exit /b 1', 'exit /b 0')) {
+                foreach ($fragment in @('drvload', 'Deployment\Drivers\Storage', 'diskpart', "set TARGETDISK=$expectedDiskId", "set MINDISKS=$minDiskCount", "set MINGB=$minTargetDiskGb", 'OSIT-DiskAssert.vbs', 'errorlevel 1', 'DIAGSCRIPT', 'DIAGLOG', 'exit /b 1', 'exit /b 0', 'OSIT-DiskCheck.ok', 'del "%OKFILE%"', 'echo OK> "%OKFILE%"')) {
                     if ($diskCheckContent -match [regex]::Escape($fragment)) {
                         Add-ValidationResult -Status Pass -Check "Disk-check command: $fragment" -Message 'Expected disk-check fragment found.'
                     }
