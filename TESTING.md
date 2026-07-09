@@ -91,6 +91,16 @@ Each scenario is a named `deployment_config.json` overlay under `Test\Rehearsal\
 
 Useful flags: `-KeepVm` leaves the VM and its disks in place for post-mortem inspection instead of tearing them down; `-SkipAssertions` skips the T13 assertion suite (media build, VM run, and artifact harvest still happen).
 
+### Quick manual VHD-boot smoke test
+
+`Invoke-DeploymentRehearsal.ps1` above builds rehearsal media from a Windows ISO on the fly and runs the full post-run assertion suite — the right tool before a release. For a faster manual loop while iterating on a change (no assertions, no ISO involved), `Test\Rehearsal\Invoke-VhdBootTestCycle.ps1` refreshes an existing bootable `1S-WIN11` VHD (one already imaged from a real Rufus USB stick to `.vhd`, e.g. `Deployment\VHD\1S-WIN11.vhd`) from the current repo state and boots a Hyper-V test VM straight from it as a hard disk:
+
+```powershell
+.\Test\Rehearsal\Invoke-VhdBootTestCycle.ps1 -Force -DisableSecureBoot
+```
+
+`-Force` tears down and recreates any previous same-named test VM (never touching the shared VHD itself); `-DisableSecureBoot` is needed if the VHD was built via Rufus's UEFI:NTFS bridge loader. Under the hood this just chains `Update-VhdBootMedia.ps1` (mount by partition label, rerun `Initialize-UsbDeployment.ps1` and `Validate-Unattend.ps1`, dismount) and `New-VhdBootTestVm.ps1` (create + start the VM) — both work standalone too.
+
 ---
 
 ## Release checklist
