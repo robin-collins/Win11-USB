@@ -255,11 +255,15 @@ function New-DiskCheckScript {
             exactly which storage controller has no working driver.
 
         .NOTES
-            UNVERIFIED ON REAL WINPE: cmd.exe FOR/IF parsing (nested parentheses, ^-escaping,
-            diskpart output token parsing) cannot be executed in this sandbox. Confirm end to
-            end via a Tier 1 Hyper-V rehearsal (see TESTING.md) before relying on this for a
-            release: check OSIT-DiskCheck.log on the rehearsal media/artifacts for the disk
-            count and target size it actually detected.
+            The disk-count/target-size FOR /F parsing has been reproduced and confirmed against
+            real cmd.exe with mock "diskpart list disk" output (two disks, including the header's
+            literal "Disk ###" row correctly excluded). The drvload/storage-driver-loading and
+            cscript/OSIT-DiskAssert.vbs branches still cannot be exercised outside a real WinPE
+            boot. Confirm end to end via a Tier 1 Hyper-V rehearsal (see TESTING.md) before
+            relying on this for a release: check OSIT-DiskCheck.log on the rehearsal media/
+            artifacts for the disk count and target size it actually detected. Also note
+            findstr.exe is NOT reliably present in a plain Windows Setup WinPE image -- do not
+            reintroduce a dependency on it here.
     #>
     param(
         [int]$DiskId,
@@ -330,16 +334,22 @@ function New-DiskCheckScript {
         'diskpart /s "%DPSCRIPT%" > "%DPOUT%" 2>&1',
         'type "%DPOUT%">> "%LOGFILE%"',
         '',
-        # Deliberately not "findstr ... | find /c /v """ piped through a single for /f capture:
-        # a pipe inside a for /f (''...'') command -- even ^-escaped -- was found to hang cmd.exe
-        # indefinitely under real testing (reproduced and confirmed before this was written this
-        # way). Counting matched lines by iterating the for /f loop itself avoids any pipe.
+        # findstr.exe is NOT present in the plain Windows Setup WinPE image (confirmed on real
+        # hardware: "'findstr' is not recognized as an internal or external command"), so
+        # counting/parsing "diskpart list disk" output uses pure batch FOR /F tokenizing instead --
+        # no external tool, no regex, and (per the pipe note this replaced) no pipe inside a
+        # for /f (''...'') command either, which was separately confirmed to hang cmd.exe. This
+        # relies only on diskpart''s header row always being the literal text "Disk ###" (never a
+        # real disk number) to tell data rows apart from the header/separator rows.
         'set DISKCOUNT=0',
-        'for /f %%N in (''findstr /r /c:"^  Disk [0-9]" "%DPOUT%"'') do set /a DISKCOUNT+=1',
-        '',
         'set TARGETSIZEGB=0',
-        'for /f "tokens=2,4,5" %%A in (''findstr /r /c:"^  Disk %TARGETDISK%[^0-9]" "%DPOUT%"'') do (',
-        '    if /i "%%C"=="TB" (set /a TARGETSIZEGB=%%B*1024) else if /i "%%C"=="MB" (set /a TARGETSIZEGB=%%B/1024) else (set /a TARGETSIZEGB=%%B)',
+        'for /f "tokens=1-5" %%A in (%DPOUT%) do (',
+        '    if /i "%%A"=="Disk" if not "%%B"=="###" (',
+        '        set /a DISKCOUNT+=1',
+        '        if "%%B"=="%TARGETDISK%" (',
+        '            if /i "%%E"=="TB" (set /a TARGETSIZEGB=%%D*1024) else if /i "%%E"=="MB" (set /a TARGETSIZEGB=%%D/1024) else (set /a TARGETSIZEGB=%%D)',
+        '        )',
+        '    )',
         ')',
         '',
         'echo Disk count detected: %DISKCOUNT% >> "%LOGFILE%"',
