@@ -599,8 +599,8 @@ function Invoke-UnattendValidation {
                 $diskAssertContent = Get-Content -LiteralPath $diskAssertScriptPath -Raw
 
                 $assertNoPartitions = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_no_existing_partitions' -Default $true)
-                $assertInterfaceType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_interface_type' -Default $false)
-                $assertMediaType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_media_type' -Default $false)
+                $assertInterfaceType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_interface_type' -Default $true)
+                $assertMediaType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_media_type' -Default $true)
                 $maxTargetDiskGb = [int](Get-ConfigProperty -Config $config -Name 'wipe_maximum_target_disk_gb' -Default 4000)
 
                 $expectedFragments = @("PHYSICALDRIVE$expectedDiskId", 'WScript.Quit 1')
@@ -627,7 +627,7 @@ function Invoke-UnattendValidation {
                 Add-ValidationResult -Status Pass -Check 'Disk-diagnostic script file' -Message "Companion on-failure diagnostic script found: $diskDiagScriptPath"
                 $diskDiagContent = Get-Content -LiteralPath $diskDiagScriptPath -Raw
 
-                foreach ($fragment in @('Win32_ComputerSystem', 'Win32_BIOS', 'Win32_DiskDrive', 'Win32_PnPEntity', 'ConfigManagerErrorCode', 'MsgBox', 'OpenTextFile')) {
+                foreach ($fragment in @('Win32_ComputerSystem', 'Win32_BIOS', 'Win32_DiskDrive', 'Win32_PnPEntity', 'ConfigManagerErrorCode', 'MsgBox', 'OpenTextFile', 'd.Index', 'wipe_repartition_disk_id')) {
                     if ($diskDiagContent -match [regex]::Escape($fragment)) {
                         Add-ValidationResult -Status Pass -Check "Disk-diagnostic command: $fragment" -Message 'Expected disk-diagnostic fragment found.'
                     }

@@ -145,14 +145,27 @@ function New-DiskDiagnosticScript {
 
         .DESCRIPTION
             Run only from OSIT-DiskCheck.cmd's own failure branches (disk count too low, target
-            disk too small, or an OSIT-DiskAssert.vbs assertion failing) -- the same "a storage
-            driver is likely missing" scenario those checks already exist to catch. Gathers, via
+            disk too small, or an OSIT-DiskAssert.vbs assertion failing) -- covers both the
+            original "a storage driver is likely missing" scenario and the field-confirmed one
+            where every needed disk is already visible but WinPE's enumeration simply put the
+            USB/boot media at the configured disk ID instead of the internal disk. Gathers, via
             WMI: the notebook's own make/model (Win32_ComputerSystem) and serial number
             (Win32_BIOS) so a technician can identify the exact machine without reading a label;
-            every disk WinPE can currently see (Win32_DiskDrive) -- normally just the USB stick in
-            this failure scenario; and every PnP device with no working driver
-            (Win32_PnPEntity where ConfigManagerErrorCode <> 0), whose PNPDeviceID's VEN_/DEV_
-            tokens identify exactly which storage controller chipset needs a driver.
+            every disk WinPE can currently see (Win32_DiskDrive), each tagged with its actual
+            PHYSICALDRIVE/diskpart disk number (Index) rather than an arbitrary list position, so
+            it can be read directly back into wipe_repartition_disk_id; and every PnP device with
+            no working driver (Win32_PnPEntity where ConfigManagerErrorCode <> 0), whose
+            PNPDeviceID's VEN_/DEV_ tokens identify exactly which storage controller chipset needs
+            a driver.
+
+            Also flags every visible disk that is Fixed/non-removable and at least
+            $MinTargetDiskGb GB but is NOT the configured target disk, as a likely-correct
+            candidate. This is deliberately diagnostic-only guidance for a technician to act on
+            (update wipe_repartition_disk_id and regenerate the USB) rather than something this
+            script or OSIT-DiskCheck.cmd auto-switches to: Windows Setup parses
+            ImageInstall/InstallTo/DiskID from the answer file into memory before any windowsPE
+            RunSynchronousCommand runs, so nothing running at this point can change which disk
+            Setup will actually install to.
 
             Writes the same report to the given output path (USB root) and shows it as a modal
             MsgBox. MsgBox renders as a real dialog under cscript.exe as much as wscript.exe --
@@ -201,17 +214,30 @@ function New-DiskDiagnosticScript {
         '  report = report & "  Serial: " & b.SerialNumber & vbCrLf',
         'Next',
         '',
-        'report = report & vbCrLf & "Disks currently visible to WinPE:" & vbCrLf',
-        'Set diskSet = wmi.ExecQuery("SELECT Model, InterfaceType, MediaType, Size, PNPDeviceID FROM Win32_DiskDrive")',
+        'report = report & vbCrLf & "Disks currently visible to WinPE (Disk N matches diskpart/PHYSICALDRIVE numbering):" & vbCrLf',
+        'Set diskSet = wmi.ExecQuery("SELECT Index, Model, InterfaceType, MediaType, Size, PNPDeviceID FROM Win32_DiskDrive")',
         'diskCount = 0',
+        'candidates = ""',
         'For Each d In diskSet',
         '  diskCount = diskCount + 1',
         '  sizeText = "unknown size"',
-        '  If IsNumeric(d.Size) Then sizeText = CStr(CLng(d.Size / 1024 / 1024 / 1024)) & " GB"',
-        '  report = report & "  " & diskCount & ". " & d.Model & "  [" & d.InterfaceType & "/" & d.MediaType & ", " & sizeText & "]" & vbCrLf',
+        '  sizeGb = -1',
+        '  If IsNumeric(d.Size) Then',
+        '    sizeGb = CLng(d.Size / 1024 / 1024 / 1024)',
+        '    sizeText = CStr(sizeGb) & " GB"',
+        '  End If',
+        '  report = report & "  Disk " & d.Index & ": " & d.Model & "  [" & d.InterfaceType & "/" & d.MediaType & ", " & sizeText & "]" & vbCrLf',
         '  report = report & "     " & d.PNPDeviceID & vbCrLf',
+        '  If d.MediaType = "Fixed hard disk media" And sizeGb >= minTargetDiskGb And d.Index <> targetDiskId Then',
+        '    candidates = candidates & "  Disk " & d.Index & " (" & sizeText & ")" & vbCrLf',
+        '  End If',
         'Next',
         'If diskCount = 0 Then report = report & "  (none detected at all)" & vbCrLf',
+        '',
+        'If candidates <> "" Then',
+        '  report = report & vbCrLf & "Disk " & targetDiskId & " is configured (wipe_repartition_disk_id), but this looked like a better candidate (fixed, non-removable, at least " & minTargetDiskGb & " GB):" & vbCrLf & candidates',
+        '  report = report & "If this is the correct internal disk for this hardware model, update wipe_repartition_disk_id in deployment_config.json to match and regenerate the USB -- retrying on this same media will hit the same check again." & vbCrLf',
+        'End If',
         '',
         'report = report & vbCrLf & "Devices with no working driver (the storage controller is likely one of these):" & vbCrLf',
         'Set pnpSet = wmi.ExecQuery("SELECT Name, Manufacturer, PNPDeviceID, ConfigManagerErrorCode FROM Win32_PnPEntity WHERE ConfigManagerErrorCode <> 0")',
