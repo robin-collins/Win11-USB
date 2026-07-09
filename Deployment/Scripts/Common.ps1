@@ -322,8 +322,8 @@ function Get-DefaultDeploymentConfig {
         wipe_minimum_target_disk_gb      = 100
         wipe_maximum_target_disk_gb      = 4000
         wipe_assert_no_existing_partitions = $true
-        wipe_assert_fixed_interface_type = $false
-        wipe_assert_fixed_media_type     = $false
+        wipe_assert_fixed_interface_type = $true
+        wipe_assert_fixed_media_type     = $true
         efi_partition_size_mb            = 512
         msr_partition_size_mb            = 16
         recovery_partition_size_mb       = 2048

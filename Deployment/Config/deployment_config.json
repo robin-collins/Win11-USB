@@ -42,14 +42,14 @@
   },
   "allow_random_password_export": false,
   "install_winget_apps": true,
-  "datto_rmm_site_id_uuid": "9676214d-5fcf-475a-a032-66fc7df02461",
+  "datto_rmm_site_id_uuid": "239e9e87-1a7b-448e-9fb3-b526fcc97daa",
   "datto_rmm_install_arguments": "",
   "datto_rmm_required": true,
   "install_local_apps": false,
   "install_offline_drivers": true,
   "install_network_drivers": true,
   "local_deployment_handover": {
-    "enabled": false,
+    "enabled": true,
     "local_path": "C:\\1S-WIN11",
     "require_network": true
   },
