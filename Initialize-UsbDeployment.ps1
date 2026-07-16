@@ -329,14 +329,14 @@ if (-not $SkipCopy) {
         Remove-Item -LiteralPath $targetDiskCheckLog -Force -ErrorAction SilentlyContinue
     }
 
-    $targetDiskAssertScript = Join-Path $UsbRoot $script:DiskAssertScriptFileName
-    if ($null -ne $windowsPe.DiskAssertScript) {
-        # ASCII avoids a UTF-8 BOM, which cscript.exe misreads as part of the first command.
-        Set-Content -LiteralPath $targetDiskAssertScript -Value $windowsPe.DiskAssertScript -Encoding ASCII -Force -ErrorAction Stop
-        Write-Host "WMI disk assertion script written to $targetDiskAssertScript" -ForegroundColor Green
-    } elseif (Test-Path -LiteralPath $targetDiskAssertScript -PathType Leaf) {
+    # OSIT-DiskAssert.vbs is no longer generated: its per-property WMI assertions false-failed in
+    # the field on a machine whose disk 0 genuinely was the internal disk (an existing Windows
+    # install meant it already had partitions). OSIT-DiskCheck.cmd's relative-size check replaced
+    # it; remove any stale copy left on a previously initialised USB so WinPE never runs it.
+    $targetDiskAssertScript = Join-Path $UsbRoot 'OSIT-DiskAssert.vbs'
+    if (Test-Path -LiteralPath $targetDiskAssertScript -PathType Leaf) {
         Remove-Item -LiteralPath $targetDiskAssertScript -Force -ErrorAction Stop
-        Write-Host "Removed stale $targetDiskAssertScript because wipe_repartition_drive is disabled." -ForegroundColor Yellow
+        Write-Host "Removed stale $targetDiskAssertScript (superseded by the relative-size check in OSIT-DiskCheck.cmd)." -ForegroundColor Yellow
     }
 
     $targetDiskDiagScript = Join-Path $UsbRoot $script:DiskDiagScriptFileName

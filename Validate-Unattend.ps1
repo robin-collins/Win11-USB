@@ -579,8 +579,7 @@ function Invoke-UnattendValidation {
                 $diskCheckContent = Get-Content -LiteralPath $diskCheckScriptPath -Raw
 
                 $minDiskCount = [int](Get-ConfigProperty -Config $config -Name 'wipe_minimum_disk_count' -Default 2)
-                $minTargetDiskGb = [int](Get-ConfigProperty -Config $config -Name 'wipe_minimum_target_disk_gb' -Default 100)
-                foreach ($fragment in @('drvload', 'Deployment\Drivers\Storage', 'diskpart', "set TARGETDISK=$expectedDiskId", "set MINDISKS=$minDiskCount", "set MINGB=$minTargetDiskGb", 'OSIT-DiskAssert.vbs', 'errorlevel 1', 'DIAGSCRIPT', 'DIAGLOG', 'exit /b 1', 'exit /b 0', 'OSIT-DiskCheck.ok', 'del "%OKFILE%"', 'echo OK> "%OKFILE%"')) {
+                foreach ($fragment in @('drvload', 'Deployment\Drivers\Storage', 'diskpart', "set TARGETDISK=$expectedDiskId", "set MINDISKS=$minDiskCount", 'MAXOTHERSIZEGB', 'LEQ %MAXOTHERSIZEGB%', 'DIAGSCRIPT', 'DIAGLOG', 'exit /b 1', 'exit /b 0', 'OSIT-DiskCheck.ok', 'del "%OKFILE%"', 'echo OK> "%OKFILE%"')) {
                     if ($diskCheckContent -match [regex]::Escape($fragment)) {
                         Add-ValidationResult -Status Pass -Check "Disk-check command: $fragment" -Message 'Expected disk-check fragment found.'
                     }
@@ -593,33 +592,12 @@ function Invoke-UnattendValidation {
                 Add-ValidationResult -Status Fail -Check 'Disk-check script file' -Message "windowsPE pass expects $script:DiskCheckScriptFileName beside the answer file, but it was not found: $diskCheckScriptPath"
             }
 
-            $diskAssertScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskAssertScriptFileName
+            # OSIT-DiskAssert.vbs is no longer generated (superseded by OSIT-DiskCheck.cmd's
+            # relative-size check); a leftover copy on a previously initialised USB is harmless
+            # (nothing invokes it any more) but worth flagging so the media gets refreshed.
+            $diskAssertScriptPath = Join-Path (Split-Path -Parent $resolvedPath) 'OSIT-DiskAssert.vbs'
             if (Test-Path -LiteralPath $diskAssertScriptPath -PathType Leaf) {
-                Add-ValidationResult -Status Pass -Check 'Disk-assert script file' -Message "Companion WMI disk-assertion script found: $diskAssertScriptPath"
-                $diskAssertContent = Get-Content -LiteralPath $diskAssertScriptPath -Raw
-
-                $assertNoPartitions = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_no_existing_partitions' -Default $true)
-                $assertInterfaceType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_interface_type' -Default $true)
-                $assertMediaType = [bool](Get-ConfigProperty -Config $config -Name 'wipe_assert_fixed_media_type' -Default $true)
-                $maxTargetDiskGb = [int](Get-ConfigProperty -Config $config -Name 'wipe_maximum_target_disk_gb' -Default 4000)
-
-                $expectedFragments = @("PHYSICALDRIVE$expectedDiskId", 'WScript.Quit 1')
-                if ($assertNoPartitions) { $expectedFragments += 'drive.Partitions' }
-                if ($assertInterfaceType) { $expectedFragments += 'drive.InterfaceType' }
-                if ($assertMediaType) { $expectedFragments += 'drive.MediaType' }
-                if ($maxTargetDiskGb -gt 0) { $expectedFragments += "expected = $maxTargetDiskGb" }
-
-                foreach ($fragment in $expectedFragments) {
-                    if ($diskAssertContent -match [regex]::Escape($fragment)) {
-                        Add-ValidationResult -Status Pass -Check "Disk-assert command: $fragment" -Message 'Expected disk-assertion fragment found.'
-                    }
-                    else {
-                        Add-ValidationResult -Status Fail -Check "Disk-assert command: $fragment" -Message 'Expected disk-assertion fragment missing from OSIT-DiskAssert.vbs.'
-                    }
-                }
-            }
-            else {
-                Add-ValidationResult -Status Fail -Check 'Disk-assert script file' -Message "OSIT-DiskCheck.cmd expects $script:DiskAssertScriptFileName beside the answer file, but it was not found: $diskAssertScriptPath"
+                Add-ValidationResult -Status Warn -Check 'Stale disk-assert script file' -Message "OSIT-DiskAssert.vbs is no longer used by OSIT-DiskCheck.cmd but was found beside the answer file: $diskAssertScriptPath. Rerun Initialize-UsbDeployment.ps1 to remove it."
             }
 
             $diskDiagScriptPath = Join-Path (Split-Path -Parent $resolvedPath) $script:DiskDiagScriptFileName
@@ -790,12 +768,6 @@ function New-CiGeneratedUnattendArtifacts {
         $generatedDiskCheckPath = Join-Path $DestinationDirectory $script:DiskCheckScriptFileName
         # ASCII avoids a UTF-8 BOM, matching exactly how Initialize-UsbDeployment.ps1 writes this file.
         Set-Content -LiteralPath $generatedDiskCheckPath -Value $generated.DiskCheckScript -Encoding ASCII -Force -ErrorAction Stop
-    }
-
-    if ($null -ne $generated.DiskAssertScript) {
-        $generatedDiskAssertPath = Join-Path $DestinationDirectory $script:DiskAssertScriptFileName
-        # ASCII avoids a UTF-8 BOM, matching exactly how Initialize-UsbDeployment.ps1 writes this file.
-        Set-Content -LiteralPath $generatedDiskAssertPath -Value $generated.DiskAssertScript -Encoding ASCII -Force -ErrorAction Stop
     }
 
     if ($null -ne $generated.DiskDiagScript) {

@@ -26,7 +26,6 @@ $script:DiskPartLogFileName = 'OSIT-DiskPart.log'
 $script:DiskCheckScriptFileName = 'OSIT-DiskCheck.cmd'
 $script:DiskCheckLogFileName = 'OSIT-DiskCheck.log'
 $script:DiskCheckOkFileName = 'OSIT-DiskCheck.ok'
-$script:DiskAssertScriptFileName = 'OSIT-DiskAssert.vbs'
 $script:DiskDiagScriptFileName = 'OSIT-DiskDiag.vbs'
 $script:DiskDiagLogFileName = 'OSIT-DiskDiag.log'
 $script:StorageDriversRelativePath = 'Deployment\Drivers\Storage'
@@ -34,105 +33,6 @@ $script:StorageDriversRelativePath = 'Deployment\Drivers\Storage'
 function ConvertTo-XmlText {
     param([AllowEmptyString()][string]$Value)
     return [System.Security.SecurityElement]::Escape($Value)
-}
-
-function New-DiskAssertScript {
-    <#
-        .SYNOPSIS
-            Builds OSIT-DiskAssert.vbs: a WinPE-safe WMI-based companion to OSIT-DiskCheck.cmd
-            that inspects the target disk itself rather than diskpart's text output.
-
-        .DESCRIPTION
-            OSIT-DiskCheck.cmd's disk-count/size checks come from parsing "diskpart list disk"
-            text, which has no columns for interface type, media type, or partition count. This
-            script queries Win32_DiskDrive for the configured target disk directly (the same WMI
-            approach used by cschneegans/unattend-generator's disk-assertion feature, adapted here
-            to a known disk ID instead of parsing it out of a diskpart script) and fails with
-            exit code 1 -- caught by OSIT-DiskCheck.cmd and propagated as its own failure -- if
-            any enabled assertion does not hold. Every assertion is optional and off by default
-            except AssertNoExistingPartitions: interface-type/media-type checks are skipped by
-            default because real-world storage controllers (RAID/NVMe) can report unexpected
-            values and a false positive here would abort a legitimate production deployment.
-    #>
-    param(
-        [int]$DiskId,
-        [int]$MaxTargetDiskGb,
-        [bool]$AssertNoExistingPartitions,
-        [bool]$AssertFixedInterfaceType,
-        [bool]$AssertFixedMediaType
-    )
-
-    # Built via [char] + string concatenation, not inline "" / '' escaping: VBScript's own
-    # quoting rules mean these lines need both a literal " (VBScript string delimiter) and,
-    # in a few lines, a literal ' (wrapping a runtime value in the failure message) -- mixing
-    # both inside PowerShell's own '' / "" escaping is what caused this to be misparsed
-    # (mismatched quote counts) the first time this was written.
-    $dq = [char]34
-    $sq = [char]39
-
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.AddRange([string[]]@(
-        'Function Fail(message)',
-        '  WScript.Echo message',
-        '  WScript.Quit 1',
-        'End Function',
-        '',
-        'On Error Resume Next',
-        'Set wmi = GetObject("winmgmts:\\.\root\cimv2")',
-        ('Set drive = wmi.Get(' + $dq + 'Win32_DiskDrive.DeviceID=' + $sq + '\\.\PHYSICALDRIVE' + $DiskId + $sq + $dq + ')'),
-        'If Err.Number <> 0 Then',
-        ('  Fail ' + $dq + 'Could not locate disk ' + $DiskId + ' (' + $dq + ' & Err.Description & ' + $dq + ').' + $dq),
-        'End If'
-    ))
-
-    if ($AssertFixedInterfaceType) {
-        $lines.AddRange([string[]]@(
-            '',
-            'actual = drive.InterfaceType',
-            'If actual <> "IDE" And actual <> "SCSI" Then',
-            ('  Fail ' + $dq + 'InterfaceType ' + $sq + $dq + ' & actual & ' + $dq + $sq + ' of disk ' + $DiskId + ' is unexpected -- this looks like removable/USB media, not the internal disk.' + $dq),
-            'End If'
-        ))
-    }
-
-    if ($AssertFixedMediaType) {
-        $lines.AddRange([string[]]@(
-            '',
-            'actual = drive.MediaType',
-            'If actual <> "Fixed hard disk media" Then',
-            ('  Fail ' + $dq + 'MediaType ' + $sq + $dq + ' & actual & ' + $dq + $sq + ' of disk ' + $DiskId + ' is unexpected -- this looks like removable media, not the internal disk.' + $dq),
-            'End If'
-        ))
-    }
-
-    if ($MaxTargetDiskGb -gt 0) {
-        $lines.AddRange([string[]]@(
-            '',
-            'actual = CInt( drive.Size / 1024 / 1024 / 1024 )',
-            ('expected = ' + $MaxTargetDiskGb),
-            'If actual > expected Then',
-            ('  Fail ' + $dq + 'Size of disk ' + $DiskId + ' is expected to be at most ' + $dq + ' & expected & ' + $dq + ' GiB, but actually is ' + $dq + ' & actual & ' + $dq + ' GiB. Refusing to wipe -- this looks larger than expected for the internal disk.' + $dq),
-            'End If'
-        ))
-    }
-
-    if ($AssertNoExistingPartitions) {
-        $lines.AddRange([string[]]@(
-            '',
-            'actual = drive.Partitions',
-            'If actual > 0 Then',
-            ('  Fail ' + $dq + 'There are already ' + $dq + ' & actual & ' + $dq + ' partition(s) on disk ' + $DiskId + '. Refusing to wipe a disk that already has partitions -- if this is expected, disable wipe_assert_no_existing_partitions.' + $dq),
-            'End If'
-        ))
-    }
-
-    $lines.AddRange([string[]]@(
-        '',
-        'WScript.Echo "Disk assertions were satisfied."',
-        'WScript.Quit 0'
-    ))
-
-    return ($lines -join "`r`n")
 }
 
 function New-DiskDiagnosticScript {
@@ -144,34 +44,35 @@ function New-DiskDiagnosticScript {
             safety net refused to wipe.
 
         .DESCRIPTION
-            Run only from OSIT-DiskCheck.cmd's own failure branches (disk count too low, target
-            disk too small, or an OSIT-DiskAssert.vbs assertion failing) -- covers both the
-            original "a storage driver is likely missing" scenario and the field-confirmed one
-            where every needed disk is already visible but WinPE's enumeration simply put the
-            USB/boot media at the configured disk ID instead of the internal disk. Gathers, via
-            WMI: the notebook's own make/model (Win32_ComputerSystem) and serial number
-            (Win32_BIOS) so a technician can identify the exact machine without reading a label;
-            every disk WinPE can currently see (Win32_DiskDrive), each tagged with its actual
-            PHYSICALDRIVE/diskpart disk number (Index) rather than an arbitrary list position, so
-            it can be read directly back into wipe_repartition_disk_id; and every PnP device with
-            no working driver (Win32_PnPEntity where ConfigManagerErrorCode <> 0), whose
-            PNPDeviceID's VEN_/DEV_ tokens identify exactly which storage controller chipset needs
-            a driver.
+            Run only from OSIT-DiskCheck.cmd's own failure branches (fewer than $MinDiskCount
+            disks visible, or the configured target disk not strictly larger than every other
+            visible disk) -- covers both the original "a storage driver is likely missing"
+            scenario and the field-confirmed one where every needed disk is already visible but
+            WinPE's enumeration simply put the USB/boot media at the configured disk ID instead
+            of the internal disk. Gathers, via WMI: the notebook's own make/model
+            (Win32_ComputerSystem) and serial number (Win32_BIOS) so a technician can identify
+            the exact machine without reading a label; every disk WinPE can currently see
+            (Win32_DiskDrive), each tagged with its actual PHYSICALDRIVE/diskpart disk number
+            (Index) rather than an arbitrary list position, so it can be read directly back into
+            wipe_repartition_disk_id; and every PnP device with no working driver
+            (Win32_PnPEntity where ConfigManagerErrorCode <> 0), whose PNPDeviceID's VEN_/DEV_
+            tokens identify exactly which storage controller chipset needs a driver.
 
-            Also flags every visible disk that is Fixed/non-removable and at least
-            $MinTargetDiskGb GB but is NOT the configured target disk, as a likely-correct
+            Also flags every visible disk that is Fixed/non-removable and at least as large as
+            the configured target disk but is NOT the configured target disk, as a likely-correct
             candidate. This is deliberately diagnostic-only guidance for a technician to act on
-            (update wipe_repartition_disk_id and regenerate the USB) rather than something this
-            script or OSIT-DiskCheck.cmd auto-switches to: Windows Setup parses
-            ImageInstall/InstallTo/DiskID from the answer file into memory before any windowsPE
-            RunSynchronousCommand runs, so nothing running at this point can change which disk
-            Setup will actually install to.
+            (integrate the storage driver into the media with IntegrateDriversToWindowsInstall.ps1
+            so the internal disk enumerates at boot, or update wipe_repartition_disk_id and
+            regenerate the USB) rather than something this script or OSIT-DiskCheck.cmd
+            auto-switches to: Windows Setup parses ImageInstall/InstallTo/DiskID from the answer
+            file into memory before any windowsPE RunSynchronousCommand runs, so nothing running
+            at this point can change which disk Setup will actually install to.
 
             Writes the same report to the given output path (USB root) and shows it as a modal
             MsgBox. MsgBox renders as a real dialog under cscript.exe as much as wscript.exe --
             the cscript/wscript distinction only changes plain WScript.Echo's behaviour, not
-            VBScript's own MsgBox -- so this uses cscript.exe for consistency with
-            OSIT-DiskAssert.vbs rather than switching hosts.
+            VBScript's own MsgBox -- so this uses cscript.exe, which is guaranteed present in
+            WinPE, rather than switching hosts.
 
         .NOTES
             UNVERIFIED ON REAL WINPE: whether a MsgBox raised by a windowsPE-pass
@@ -182,8 +83,7 @@ function New-DiskDiagnosticScript {
     #>
     param(
         [int]$DiskId,
-        [int]$MinDiskCount,
-        [int]$MinTargetDiskGb
+        [int]$MinDiskCount
     )
 
     return @(
@@ -194,15 +94,14 @@ function New-DiskDiagnosticScript {
         # with a VBScript string literal can stay a plain single-quoted PowerShell string, with
         # VBScript's own double quotes passing through unescaped. Mixing PowerShell string
         # interpolation with VBScript's double-quote literals on the same line is exactly what
-        # produced a mismatched-quote-count parse failure the first time OSIT-DiskAssert.vbs was
-        # written this way -- not repeating that here.
+        # produced a mismatched-quote-count parse failure the first time these companion .vbs
+        # scripts were written this way -- not repeating that here.
         "minDiskCount = $MinDiskCount",
         "targetDiskId = $DiskId",
-        "minTargetDiskGb = $MinTargetDiskGb",
         'Set wmi = GetObject("winmgmts:\\.\root\cimv2")',
         '',
         'report = "=== OSIT Disk Diagnostic ===" & vbCrLf',
-        'report = report & "Looking for at least " & minDiskCount & " disk(s); target disk " & targetDiskId & " must be at least " & minTargetDiskGb & " GB." & vbCrLf & vbCrLf',
+        'report = report & "Looking for at least " & minDiskCount & " disk(s); target disk " & targetDiskId & " must be strictly larger than every other visible disk." & vbCrLf & vbCrLf',
         '',
         'report = report & "Device make/model:" & vbCrLf',
         'Set sysSet = wmi.ExecQuery("SELECT Manufacturer, Model FROM Win32_ComputerSystem")',
@@ -212,6 +111,14 @@ function New-DiskDiagnosticScript {
         'Set biosSet = wmi.ExecQuery("SELECT SerialNumber FROM Win32_BIOS")',
         'For Each b In biosSet',
         '  report = report & "  Serial: " & b.SerialNumber & vbCrLf',
+        'Next',
+        '',
+        # First pass: resolve the configured target disk's size so the main loop below can flag
+        # every other disk that is at least as large as a likely-correct candidate.
+        'targetSizeGb = -1',
+        'Set targetSet = wmi.ExecQuery("SELECT Index, Size FROM Win32_DiskDrive")',
+        'For Each t In targetSet',
+        '  If t.Index = targetDiskId And IsNumeric(t.Size) Then targetSizeGb = CLng(t.Size / 1024 / 1024 / 1024)',
         'Next',
         '',
         'report = report & vbCrLf & "Disks currently visible to WinPE (Disk N matches diskpart/PHYSICALDRIVE numbering):" & vbCrLf',
@@ -228,15 +135,15 @@ function New-DiskDiagnosticScript {
         '  End If',
         '  report = report & "  Disk " & d.Index & ": " & d.Model & "  [" & d.InterfaceType & "/" & d.MediaType & ", " & sizeText & "]" & vbCrLf',
         '  report = report & "     " & d.PNPDeviceID & vbCrLf',
-        '  If d.MediaType = "Fixed hard disk media" And sizeGb >= minTargetDiskGb And d.Index <> targetDiskId Then',
+        '  If d.MediaType = "Fixed hard disk media" And sizeGb >= targetSizeGb And d.Index <> targetDiskId Then',
         '    candidates = candidates & "  Disk " & d.Index & " (" & sizeText & ")" & vbCrLf',
         '  End If',
         'Next',
         'If diskCount = 0 Then report = report & "  (none detected at all)" & vbCrLf',
         '',
         'If candidates <> "" Then',
-        '  report = report & vbCrLf & "Disk " & targetDiskId & " is configured (wipe_repartition_disk_id), but this looked like a better candidate (fixed, non-removable, at least " & minTargetDiskGb & " GB):" & vbCrLf & candidates',
-        '  report = report & "If this is the correct internal disk for this hardware model, update wipe_repartition_disk_id in deployment_config.json to match and regenerate the USB -- retrying on this same media will hit the same check again." & vbCrLf',
+        '  report = report & vbCrLf & "Disk " & targetDiskId & " is configured (wipe_repartition_disk_id), but these fixed, non-removable disks are at least as large -- one of them is likely the internal disk:" & vbCrLf & candidates',
+        '  report = report & "Integrate this model" & Chr(39) & "s storage controller driver into the installation media with IntegrateDriversToWindowsInstall.ps1 so the internal disk is visible from the moment Setup boots and enumerates ahead of the USB, or update wipe_repartition_disk_id in deployment_config.json and regenerate the USB -- retrying on this same media will hit the same check again." & vbCrLf',
         'End If',
         '',
         'report = report & vbCrLf & "Devices with no working driver (the storage controller is likely one of these):" & vbCrLf',
@@ -255,7 +162,7 @@ function New-DiskDiagnosticScript {
         'outFile.WriteLine report',
         'outFile.Close',
         '',
-        'MsgBox report, vbOKOnly + vbExclamation, "OSIT: storage driver missing -- see Deployment\Drivers\Storage\<Vendor> on this media"'
+        'MsgBox report, vbOKOnly + vbExclamation, "OSIT: disk safety check failed -- integrate the storage driver into this media (IntegrateDriversToWindowsInstall.ps1, drivers in Deployment\Drivers\Storage\<Vendor>)"'
     ) -join "`r`n"
 }
 
@@ -273,37 +180,44 @@ function New-DiskCheckScript {
             <Vendor> folders via drvload, giving a missing storage driver a chance to make the
             real internal disk visible, (2) re-enumerates disks with diskpart, and (3) refuses
             to continue (exit /b 1) unless at least $MinDiskCount disks are visible AND the
-            configured target disk is at least $MinTargetDiskGb, and only then writes
-            OSIT-DiskCheck.ok. Order=2's own RunSynchronous command line (built in
-            New-WindowsPeArtifacts) requires that file to exist before it will run diskpart at
-            all -- confirmed necessary in the field, where a machine failed this exact check
-            (correctly: the USB stick had enumerated as the configured disk ID) and Windows Setup
-            still ran Order=2's diskpart wipe anyway, destroying the USB's own partitions. A
-            non-zero exit from this script is not sufficient on its own to stop Windows Setup from
-            continuing to Order=2. Every failure branch (this script's own checks and
-            OSIT-DiskAssert.vbs's) runs OSIT-DiskDiag.vbs (New-DiskDiagnosticScript) first, which
-            both saves and shows on screen the machine's make/model/serial and exactly which
-            storage controller has no working driver.
+            configured target disk is strictly larger than every other visible disk (a client
+            notebook's internal disk is always larger than the deployment USB, so a target that
+            is not the largest disk means the USB/boot media has taken the configured disk ID),
+            and only then writes OSIT-DiskCheck.ok. Order=2's own RunSynchronous command line
+            (built in New-WindowsPeArtifacts) requires that file to exist before it will run
+            diskpart at all -- confirmed necessary in the field, where a machine failed this
+            exact check (correctly: the USB stick had enumerated as the configured disk ID) and
+            Windows Setup still ran Order=2's diskpart wipe anyway, destroying the USB's own
+            partitions. A non-zero exit from this script is not sufficient on its own to stop
+            Windows Setup from continuing to Order=2. Both failure branches run OSIT-DiskDiag.vbs
+            (New-DiskDiagnosticScript) first, which both saves and shows on screen the machine's
+            make/model/serial and exactly which storage controller has no working driver.
+
+            These two relative checks deliberately replaced the earlier absolute thresholds
+            (wipe_minimum_target_disk_gb) and per-property WMI assertions (OSIT-DiskAssert.vbs:
+            partition-count/interface-type/media-type/maximum-size): the absolute checks
+            false-failed in the field on a machine whose disk 0 genuinely was the internal disk
+            (an existing base Windows 11 install meant it already had partitions), while the
+            relative size comparison holds on any hardware without per-model tuning.
 
         .NOTES
-            The disk-count/target-size FOR /F parsing has been reproduced and confirmed against
-            real cmd.exe with mock "diskpart list disk" output (two disks, including the header's
-            literal "Disk ###" row correctly excluded). The drvload/storage-driver-loading and
-            cscript/OSIT-DiskAssert.vbs branches still cannot be exercised outside a real WinPE
+            The disk-count/size FOR /F parsing has been reproduced and confirmed against real
+            cmd.exe with mock "diskpart list disk" output (including the header's literal
+            "Disk ###" row correctly excluded, and MB/GB/TB unit normalisation). The
+            drvload/storage-driver-loading branch still cannot be exercised outside a real WinPE
             boot. Confirm end to end via a Tier 1 Hyper-V rehearsal (see TESTING.md) before
             relying on this for a release: check OSIT-DiskCheck.log on the rehearsal media/
-            artifacts for the disk count and target size it actually detected. Also note
-            findstr.exe is NOT reliably present in a plain Windows Setup WinPE image -- do not
-            reintroduce a dependency on it here. Confirmed on real hardware (not just the VM
-            rehearsal, where the target disk happens to be blank) that disk enumeration order is
-            not guaranteed: a machine with an existing OEM Windows install can still enumerate the
-            USB boot media as disk 0, which is exactly the failure mode this check plus the
+            artifacts for the disk count and sizes it actually detected. Also note findstr.exe
+            is NOT reliably present in a plain Windows Setup WinPE image -- do not reintroduce a
+            dependency on it here. Confirmed on real hardware (not just the VM rehearsal, where
+            the target disk happens to be blank) that disk enumeration order is not guaranteed:
+            a machine with an existing OEM Windows install can still enumerate the USB boot
+            media as disk 0, which is exactly the failure mode this check plus the
             OSIT-DiskCheck.ok gate exist to catch and refuse to wipe.
     #>
     param(
         [int]$DiskId,
-        [int]$MinDiskCount,
-        [int]$MinTargetDiskGb
+        [int]$MinDiskCount
     )
 
     return @(
@@ -318,7 +232,6 @@ function New-DiskCheckScript {
         "set DIAGLOG=%OSITDRIVE%\$script:DiskDiagLogFileName",
         "set TARGETDISK=$DiskId",
         "set MINDISKS=$MinDiskCount",
-        "set MINGB=$MinTargetDiskGb",
         "set OKFILE=%OSITDRIVE%\$script:DiskCheckOkFileName",
         '',
         # A prior run leaving this behind (or Windows Setup somehow re-running Order 1) must never
@@ -331,7 +244,7 @@ function New-DiskCheckScript {
         # the digit instead of writing it as text -- reproduced and confirmed with %DISKCOUNT%
         # while writing this. Every redirect below that could follow a numeric variable keeps a
         # deliberate trailing space before ">>" to keep the digit and the operator unambiguous.
-        'echo Target disk id: %TARGETDISK%  Minimum disks required: %MINDISKS%  Minimum target disk size GB: %MINGB% >> "%LOGFILE%"',
+        'echo Target disk id: %TARGETDISK%  Minimum disks required: %MINDISKS%  Target disk must be strictly larger than every other visible disk. >> "%LOGFILE%"',
         '',
         "set DRIVERROOT=%OSITDRIVE%\$script:StorageDriversRelativePath",
         # Iterates vendor subfolders one at a time (Storage\<Vendor>\*.inf), the same shape as
@@ -380,48 +293,54 @@ function New-DiskCheckScript {
         # no external tool, no regex, and (per the pipe note this replaced) no pipe inside a
         # for /f (''...'') command either, which was separately confirmed to hang cmd.exe. This
         # relies only on diskpart''s header row always being the literal text "Disk ###" (never a
-        # real disk number) to tell data rows apart from the header/separator rows.
+        # real disk number) to tell data rows apart from the header/separator rows. Every disk's
+        # size is normalised to GB so the target disk can be compared against the largest OTHER
+        # visible disk; a "No Media" status row (e.g. an empty card reader) shifts the size tokens
+        # so %%E is never a recognised unit and the row safely counts as 0 GB.
         'set DISKCOUNT=0',
         'set TARGETSIZEGB=0',
+        'set MAXOTHERSIZEGB=0',
+        'set MAXOTHERDISK=none',
         'for /f "tokens=1-5" %%A in (%DPOUT%) do (',
         '    if /i "%%A"=="Disk" if not "%%B"=="###" (',
         '        set /a DISKCOUNT+=1',
+        '        set SIZEGB=0',
+        '        if /i "%%E"=="TB" (set /a SIZEGB=%%D*1024) else if /i "%%E"=="GB" (set /a SIZEGB=%%D) else if /i "%%E"=="MB" (set /a SIZEGB=%%D/1024)',
         '        if "%%B"=="%TARGETDISK%" (',
-        '            if /i "%%E"=="TB" (set /a TARGETSIZEGB=%%D*1024) else if /i "%%E"=="MB" (set /a TARGETSIZEGB=%%D/1024) else (set /a TARGETSIZEGB=%%D)',
+        '            set /a TARGETSIZEGB=SIZEGB',
+        '        ) else (',
+        '            if !SIZEGB! GTR !MAXOTHERSIZEGB! (',
+        '                set /a MAXOTHERSIZEGB=SIZEGB',
+        '                set MAXOTHERDISK=%%B',
+        '            )',
         '        )',
         '    )',
         ')',
         '',
         'echo Disk count detected: %DISKCOUNT% >> "%LOGFILE%"',
         'echo Target disk %TARGETDISK% size GB: %TARGETSIZEGB% >> "%LOGFILE%"',
+        'echo Largest other disk: %MAXOTHERDISK% at %MAXOTHERSIZEGB% GB >> "%LOGFILE%"',
         '',
         'del "%DPSCRIPT%" >nul 2>&1',
         'del "%DPOUT%" >nul 2>&1',
         '',
         'if %DISKCOUNT% LSS %MINDISKS% (',
-        '    echo FAIL: only %DISKCOUNT% disk^(s^) visible; expected at least %MINDISKS%. A storage driver is likely missing -- see Deployment\Drivers\Storage\^<Vendor^> on this media.>> "%LOGFILE%"',
+        '    echo FAIL: only %DISKCOUNT% disk^(s^) visible; expected at least %MINDISKS% ^(this USB itself plus the internal disk^). A boot-critical storage driver is likely missing -- integrate the storage controller driver for this model into this media with IntegrateDriversToWindowsInstall.ps1 ^(drivers go under Deployment\Drivers\Storage\^<Vendor^>^).>> "%LOGFILE%"',
         '    cscript.exe //Nologo "%DIAGSCRIPT%" "%DIAGLOG%">> "%LOGFILE%" 2>&1',
         '    exit /b 1',
         ')',
         '',
-        'if %TARGETSIZEGB% LSS %MINGB% (',
-        '    echo FAIL: disk %TARGETDISK% is only %TARGETSIZEGB% GB; expected at least %MINGB% GB. Refusing to wipe -- this looks like the boot/USB media, not the internal disk.>> "%LOGFILE%"',
+        # Strictly-larger, not merely present: a client notebook's internal disk is always larger
+        # than the deployment USB, so if the configured target disk is not the single largest
+        # visible disk, the USB/boot media (or another removable device) has taken the configured
+        # disk ID and wiping it would destroy the wrong disk.
+        'if %TARGETSIZEGB% LEQ %MAXOTHERSIZEGB% (',
+        '    echo FAIL: disk %TARGETDISK% is %TARGETSIZEGB% GB but disk %MAXOTHERDISK% is %MAXOTHERSIZEGB% GB -- the target disk must be strictly larger than every other visible disk. The USB/boot media has likely enumerated as disk %TARGETDISK% because the storage controller driver loaded late or is missing -- integrate it into this media with IntegrateDriversToWindowsInstall.ps1 so the internal disk is visible from the moment Setup boots.>> "%LOGFILE%"',
         '    cscript.exe //Nologo "%DIAGSCRIPT%" "%DIAGLOG%">> "%LOGFILE%" 2>&1',
         '    exit /b 1',
         ')',
         '',
-        # OSIT-DiskAssert.vbs (New-DiskAssertScript) checks properties "list disk" text has no
-        # columns for -- interface type, media type, exact partition count -- via WMI on the
-        # already-known target disk. cscript.exe ships with WinPE, same as the toolkit's other
-        # WinPE-safe tooling.
-        "cscript.exe //E:vbscript //Nologo ""%OSITDRIVE%\$script:DiskAssertScriptFileName"">> ""%LOGFILE%"" 2>&1",
-        'if errorlevel 1 (',
-        '    echo FAIL: WMI disk assertions failed for disk %TARGETDISK% -- see OSIT-DiskAssert output above in this log.>> "%LOGFILE%"',
-        '    cscript.exe //Nologo "%DIAGSCRIPT%" "%DIAGLOG%">> "%LOGFILE%" 2>&1',
-        '    exit /b 1',
-        ')',
-        '',
-        'echo PASS: %DISKCOUNT% disk^(s^) visible; disk %TARGETDISK% is %TARGETSIZEGB% GB. Proceeding with wipe.>> "%LOGFILE%"',
+        'echo PASS: %DISKCOUNT% disk^(s^) visible; disk %TARGETDISK% ^(%TARGETSIZEGB% GB^) is the largest visible disk. Proceeding with wipe.>> "%LOGFILE%"',
         # Order 2's own command line requires this file to exist before it will run diskpart at
         # all -- confirmed necessary in the field: a machine whose disk-check FAILED here (this
         # exact popup/log) still had its USB stick wiped, meaning Windows Setup does not reliably
@@ -440,25 +359,16 @@ function New-WindowsPeArtifacts {
         Write-Host 'wipe_repartition_drive is FALSE: the generated Autounattend.xml will NOT wipe or partition any disk.' -ForegroundColor Yellow
         Write-Host 'Windows Setup will require technician-led language, disk, and image selection.' -ForegroundColor Yellow
         Write-Host 'To enable automatic wipe/partitioning, set wipe_repartition_drive=true in Deployment\Config\deployment_config.json in this toolkit folder BEFORE running this script, then rerun it.' -ForegroundColor Yellow
-        return @{ SettingsBlock = ''; DiskPartScript = $null; DiskCheckScript = $null; DiskAssertScript = $null; DiskDiagScript = $null }
+        return @{ SettingsBlock = ''; DiskPartScript = $null; DiskCheckScript = $null; DiskDiagScript = $null }
     }
 
     $diskId = [int]$Config.wipe_repartition_disk_id
     if ($diskId -lt 0) { throw 'wipe_repartition_disk_id must be 0 or greater.' }
 
+    # The disk safety check compares the target disk's size against every other visible disk,
+    # which is only meaningful when the USB/boot media itself is also visible -- hence 2, not 1.
     $minDiskCount = [int]$Config.wipe_minimum_disk_count
-    $minTargetDiskGb = [int]$Config.wipe_minimum_target_disk_gb
-    if ($minDiskCount -lt 1) { throw 'wipe_minimum_disk_count must be 1 or greater.' }
-    if ($minTargetDiskGb -lt 0) { throw 'wipe_minimum_target_disk_gb must be 0 or greater.' }
-
-    $maxTargetDiskGb = [int]$Config.wipe_maximum_target_disk_gb
-    $assertNoExistingPartitions = [bool]$Config.wipe_assert_no_existing_partitions
-    $assertFixedInterfaceType = [bool]$Config.wipe_assert_fixed_interface_type
-    $assertFixedMediaType = [bool]$Config.wipe_assert_fixed_media_type
-    if ($maxTargetDiskGb -lt 0) { throw 'wipe_maximum_target_disk_gb must be 0 or greater (0 disables the check).' }
-    if ($maxTargetDiskGb -gt 0 -and $maxTargetDiskGb -le $minTargetDiskGb) {
-        throw "wipe_maximum_target_disk_gb ($maxTargetDiskGb) must be greater than wipe_minimum_target_disk_gb ($minTargetDiskGb)."
-    }
+    if ($minDiskCount -lt 2) { throw 'wipe_minimum_disk_count must be 2 or greater (the USB/boot media plus at least one internal disk).' }
 
     $efiSize = [int]$Config.efi_partition_size_mb
     $msrSize = [int]$Config.msr_partition_size_mb
@@ -472,7 +382,7 @@ function New-WindowsPeArtifacts {
 
     Write-Host ''
     Write-Host "Destructive partitioning is ENABLED for disk $diskId." -ForegroundColor Yellow
-    Write-Host "USB-root $script:DiskCheckScriptFileName will refuse to wipe unless at least $minDiskCount disk(s) are visible and disk $diskId is at least $minTargetDiskGb GB (loading Deployment\Drivers\Storage\<Vendor> boot-critical drivers first if needed)." -ForegroundColor Yellow
+    Write-Host "USB-root $script:DiskCheckScriptFileName will refuse to wipe unless at least $minDiskCount disk(s) are visible and disk $diskId is strictly larger than every other visible disk (loading Deployment\Drivers\Storage\<Vendor> boot-critical drivers first if needed)." -ForegroundColor Yellow
     Write-Host "USB-root $script:DiskPartScriptFileName will then clean disk $diskId and create EFI $efiSize MB, MSR $msrSize MB, Windows, and WinRE $recoverySize MB partitions." -ForegroundColor Yellow
 
     # Letters S/W with noerr instead of C: WinPE often assigns C: to the USB stick when the
@@ -498,9 +408,8 @@ function New-WindowsPeArtifacts {
         'exit'
     ) -join "`r`n"
 
-    $diskCheckScript = New-DiskCheckScript -DiskId $diskId -MinDiskCount $minDiskCount -MinTargetDiskGb $minTargetDiskGb
-    $diskAssertScript = New-DiskAssertScript -DiskId $diskId -MaxTargetDiskGb $maxTargetDiskGb -AssertNoExistingPartitions $assertNoExistingPartitions -AssertFixedInterfaceType $assertFixedInterfaceType -AssertFixedMediaType $assertFixedMediaType
-    $diskDiagScript = New-DiskDiagnosticScript -DiskId $diskId -MinDiskCount $minDiskCount -MinTargetDiskGb $minTargetDiskGb
+    $diskCheckScript = New-DiskCheckScript -DiskId $diskId -MinDiskCount $minDiskCount
+    $diskDiagScript = New-DiskDiagnosticScript -DiskId $diskId -MinDiskCount $minDiskCount
 
     # The unattend schema caps RunSynchronousCommand Path at 259 characters, so both the disk
     # safety check and the diskpart wipe ship as USB-root files, and each of these commands only
@@ -537,7 +446,7 @@ function New-WindowsPeArtifacts {
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>1</Order>
-          <Description>Refuse to continue unless at least $minDiskCount disk(s) are visible and disk $diskId is at least $minTargetDiskGb GB, loading Deployment\Drivers\Storage drivers first if needed</Description>
+          <Description>Refuse to continue unless at least $minDiskCount disk(s) are visible and disk $diskId is strictly larger than every other visible disk, loading Deployment\Drivers\Storage drivers first if needed</Description>
           <Path><![CDATA[$diskCheckCommandLine]]></Path>
         </RunSynchronousCommand>
         <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -571,7 +480,7 @@ function New-WindowsPeArtifacts {
   </settings>
 "@
 
-    return @{ SettingsBlock = $settingsBlock; DiskPartScript = $diskPartScript; DiskCheckScript = $diskCheckScript; DiskAssertScript = $diskAssertScript; DiskDiagScript = $diskDiagScript }
+    return @{ SettingsBlock = $settingsBlock; DiskPartScript = $diskPartScript; DiskCheckScript = $diskCheckScript; DiskDiagScript = $diskDiagScript }
 }
 
 function Merge-AutounattendTemplate {
@@ -645,7 +554,6 @@ function New-GeneratedUnattendContent {
         AutounattendContent = $autounattendContent
         DiskPartScript      = $windowsPe.DiskPartScript
         DiskCheckScript     = $windowsPe.DiskCheckScript
-        DiskAssertScript    = $windowsPe.DiskAssertScript
         DiskDiagScript      = $windowsPe.DiskDiagScript
     }
 }
