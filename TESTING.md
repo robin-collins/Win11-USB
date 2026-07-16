@@ -101,6 +101,8 @@ Useful flags: `-KeepVm` leaves the VM and its disks in place for post-mortem ins
 
 `-Force` tears down and recreates any previous same-named test VM (never touching the shared VHD itself); `-DisableSecureBoot` is needed if the VHD was built via Rufus's UEFI:NTFS bridge loader. Under the hood this just chains `Update-VhdBootMedia.ps1` (mount by partition label, rerun `Initialize-UsbDeployment.ps1` and `Validate-Unattend.ps1`, dismount) and `New-VhdBootTestVm.ps1` (create + start the VM) — both work standalone too.
 
+`Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1` wraps the same cycle as one three-phase lifecycle over a single VM: the default phase refreshes the VHD and boots a fresh test VM (stale same-named VMs are removed unconditionally — no `-Force` needed); `-Finalize` stops the VM and mounts both its OS disk and the 1S-WIN11 media VHD on the host, leaving them mounted so the deployment/Setup logs can be read at leisure; `-Destroy` dismounts both disks and removes the VM and its working folder, always preserving `Deployment\VHD\1S-WIN11.vhd` for the next cycle.
+
 ---
 
 ## Release checklist

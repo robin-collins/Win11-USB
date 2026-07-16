@@ -40,6 +40,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deployment\Scripts\Sta
 # Refresh a bootable 1S-WIN11 VHD from the current repo state, then boot a fresh test VM from it
 .\Test\Rehearsal\Invoke-VhdBootTestCycle.ps1 -Force -DisableSecureBoot
 
+# Same VHD-boot test as one three-phase lifecycle: provision+boot, stop VM + mount both disks to read logs, tear down (keeps Deployment\VHD\1S-WIN11.vhd)
+.\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -DisableSecureBoot
+.\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -Finalize
+.\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -Destroy
+
 # Write the toolkit + generated Autounattend.xml to a real USB
 .\Initialize-UsbDeployment.ps1
 ```
