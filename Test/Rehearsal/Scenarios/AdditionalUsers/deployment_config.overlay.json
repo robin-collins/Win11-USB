@@ -1,6 +1,5 @@
 {
   "wipe_repartition_drive": true,
-  "wipe_minimum_target_disk_gb": 60,
   "require_ac_power": false,
   "msp_wifi_setup": { "enabled": false },
   "computer_name_mode": "serial",

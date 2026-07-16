@@ -49,8 +49,9 @@
 
     .PARAMETER OsDiskGB
         Size of the new dynamic target OS VHDX, in GB. Default 120 -- comfortably above both
-        Windows 11's own minimum and deployment_config.json's wipe_minimum_target_disk_gb default
-        (100), so OSIT-DiskCheck.cmd's safety check passes without needing a config override.
+        Windows 11's own minimum and the size of the attached 1S-WIN11 boot VHD, so
+        OSIT-DiskCheck.cmd's relative-size safety check (target disk strictly larger than every
+        other visible disk) passes without needing a config override.
 
     .PARAMETER MemoryGB
         Fixed VM memory in GB (dynamic memory is disabled, matching New-RehearsalVm's convention

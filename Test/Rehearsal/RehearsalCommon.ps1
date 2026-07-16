@@ -960,13 +960,13 @@ function Get-RehearsalStandardScenarioOverlay {
     param()
 
     return @{
+        # OSIT-DiskCheck.cmd's disk safety check is purely relative (at least
+        # wipe_minimum_disk_count disks visible, target disk strictly larger than every other
+        # visible disk), so no size override is needed here: New-RehearsalVm attaches the OS
+        # disk (default -OsDiskGB 80, SCSI location 0) alongside the 16 GB media VHDX, and
+        # 80 > 16 satisfies the check the same way a real notebook's internal disk out-sizes
+        # the deployment USB.
         wipe_repartition_drive = $true
-        # New-RehearsalVm's default -OsDiskGB is 80: below the toolkit-wide production default
-        # of wipe_minimum_target_disk_gb=100 (a real-world safety floor against wiping the
-        # boot/USB media when a client notebook's internal disk driver is missing). Lowering it
-        # here for the rehearsal's synthetic OS disk only -- a real client notebook's internal
-        # disk is expected to clear the production default comfortably.
-        wipe_minimum_target_disk_gb = 60
         # Verified in Deployment\Scripts\Invoke-PreflightChecks.ps1: when Get-CimInstance
         # Win32_Battery finds no battery device at all (the expected case for a Hyper-V VM),
         # the AC-power check is a Warn ("No battery was detected; assuming desktop or
