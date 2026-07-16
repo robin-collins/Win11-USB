@@ -75,15 +75,20 @@ if (-not $packageConfig.ContainsKey('packages')) {
     throw "winget package config must contain a top-level 'packages' array: $($paths.WingetFile)"
 }
 
+$packages = @($packageConfig.packages)
+Write-Log -Level Info -Message "winget app installation started: $($packages.Count) package(s) configured in $($paths.WingetFile); winget resolved at $winget."
+
 $results = @()
-foreach ($package in @($packageConfig.packages)) {
+$packageIndex = 0
+foreach ($package in $packages) {
+    $packageIndex++
     $id = [string]$package.id
     if ([string]::IsNullOrWhiteSpace($id)) { throw 'A winget package entry is missing id.' }
     $displayName = if ($package.ContainsKey('display_name') -and -not [string]::IsNullOrWhiteSpace([string]$package.display_name)) { [string]$package.display_name } else { $id }
     $required = if ($package.ContainsKey('required')) { [bool]$package.required } else { $true }
     $installArguments = if ($package.ContainsKey('install_arguments')) { [string]$package.install_arguments } else { '' }
 
-    Write-Log -Level Info -Message "Checking winget package $displayName ($id)."
+    Write-Log -Level Info -Message "Checking winget package $displayName ($id) [$packageIndex of $($packages.Count)]."
     # 'winget list' exits with NO_APPLICATIONS_FOUND (not 0/1) when the package is absent.
     # -ReadOnly: a detection query, never a mutation, so it runs for real even in dry-run
     # (FABLE_TASKS.md T07b) -- without it, Common.ps1's generic dry-run refusal (T05) would
@@ -126,6 +131,8 @@ foreach ($package in @($packageConfig.packages)) {
         Write-Log -Level Error -Message $message
         $results += ,([ordered]@{ id = $id; display_name = $displayName; status = 'Failed'; required = $required; error = $_.Exception.Message })
         if ($required -and [bool]$config.fail_on_missing_required_app) { throw $message }
+        $continueReason = if ($required) { 'fail_on_missing_required_app is disabled in deployment_config.json' } else { 'the package is not marked required' }
+        Write-Log -Level Warn -Message "Continuing after failed install of $displayName because $continueReason. Install it manually or rerun this step after fixing the cause (see winget-install-$(Get-SafeName -Value $id).log)."
     }
 }
 
@@ -136,4 +143,10 @@ if (Test-DeploymentDryRun) {
     Write-DeploymentState -State $state -StatePath $StatePath
 }
 
+$alreadyInstalledCount = @($results | Where-Object { $_.status -eq 'AlreadyInstalled' }).Count
+$installedCount = @($results | Where-Object { $_.status -like 'Installed*' }).Count
+$failedCount = @($results | Where-Object { $_.status -eq 'Failed' }).Count
+$dryRunCount = @($results | Where-Object { $_.status -eq 'DryRun' }).Count
+
 Write-StructuredLog -Level Info -Message 'winget app installation completed' -Data $results
+Write-Log -Level Success -Message "winget app installation completed: $installedCount installed, $alreadyInstalledCount already installed, $failedCount failed$(if ($dryRunCount -gt 0) { ", $dryRunCount dry-run" }) of $($packages.Count) package(s)."

@@ -21,6 +21,7 @@ function Initialize-PSWindowsUpdateModule {
     $module = Get-Module -ListAvailable -Name PSWindowsUpdate | Sort-Object Version -Descending | Select-Object -First 1
     if ($module) {
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        Write-Log -Level Info -Message "PSWindowsUpdate $($module.Version) is available."
         return $true
     }
 
@@ -40,7 +41,7 @@ function Initialize-PSWindowsUpdateModule {
         Import-Module PSWindowsUpdate -Force -ErrorAction Stop
         return $true
     } catch {
-        Write-Log -Level Warn -Message "PSWindowsUpdate bootstrap failed: $($_.Exception.Message)"
+        Write-Log -Level Warn -Message "PSWindowsUpdate bootstrap failed: $($_.Exception.Message). Falling back to the Windows Update COM API for this run."
         return $false
     }
 }
@@ -213,6 +214,10 @@ if (Test-DeploymentDryRun) {
 
 $useModule = Initialize-PSWindowsUpdateModule -Bootstrap ([bool]$config.pswindowsupdate_bootstrap)
 
+$startCycle = [int]$state.update_cycle + 1
+$updateMethod = if ($useModule) { 'PSWindowsUpdate' } else { 'COM fallback' }
+Write-Log -Level Info -Message "Windows Update step started at cycle $startCycle of $maxCycles (method=$updateMethod, include_microsoft_update=$includeMicrosoftUpdate, pswindowsupdate_bootstrap=$([bool]$config.pswindowsupdate_bootstrap))."
+
 for ($cycle = ([int]$state.update_cycle + 1); $cycle -le $maxCycles; $cycle++) {
     $state.update_cycle = $cycle
     Add-StateHistory -State $state -Event 'windows_update_cycle_started' -Data @{ cycle = $cycle; max_cycles = $maxCycles; method = $(if ($useModule) { 'PSWindowsUpdate' } else { 'COM' }) }
@@ -222,13 +227,14 @@ for ($cycle = ([int]$state.update_cycle + 1); $cycle -le $maxCycles; $cycle++) {
     if ($useModule) {
         $cycleResult = Invoke-PSWindowsUpdateCycle -IncludeMicrosoftUpdate $includeMicrosoftUpdate
     } else {
-        Write-Log -Level Warn -Message 'Using Windows Update COM fallback because PSWindowsUpdate is unavailable.'
+        Write-Log -Level Warn -Message 'Using Windows Update COM fallback because PSWindowsUpdate is unavailable (enable pswindowsupdate_bootstrap in deployment_config.json to install it automatically).'
         $cycleResult = Invoke-ComWindowsUpdateCycle
     }
 
     Add-StateHistory -State $state -Event 'windows_update_cycle_completed' -Data @{ cycle = $cycle; result = $cycleResult }
     Write-DeploymentState -State $state -StatePath $StatePath
     Write-StructuredLog -Level Info -Message "Windows Update cycle $cycle completed" -Data $cycleResult
+    Write-Log -Level Info -Message "Windows Update cycle $cycle of $maxCycles completed: $($cycleResult.installed_count) update(s) installed; reboot required: $($cycleResult.reboot_required)."
 
     if ([int]$cycleResult.installed_count -eq 0) {
         Write-Log -Level Success -Message 'No additional Windows updates were found.'

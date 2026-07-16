@@ -48,13 +48,16 @@ function Invoke-SystemTweak {
         Write-DryRunAction -State $state -Step 'SystemTweaks' -Action "would $Description" -Data $DryRunData
         return
     }
+    Write-Log -Level Info -Message "Applying system tweak: $Description"
     & $Action
 }
 
 if (-not [bool]$config.configure_system_tweaks) {
-    Write-Log -Level Info -Message 'System tweaks configuration is disabled by config.'
+    Write-Log -Level Info -Message 'System tweaks configuration is disabled by config (configure_system_tweaks=false); skipping.'
     return
 }
+
+Write-Log -Level Info -Message "System tweaks step started; system_tweaks config keys: $(@($tweaks.Keys) -join ', ')."
 
 $bloatwareIds = @($tweaks.remove_bloatware)
 if ($bloatwareIds.Count -gt 0) {

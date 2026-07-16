@@ -31,6 +31,8 @@ try {
 $configuredSsid = if ($config -and $config.ContainsKey('msp_wifi_setup')) { [string](ConvertTo-PlainHashtable $config.msp_wifi_setup).ssid } else { 'OneSolution' }
 if ([string]::IsNullOrWhiteSpace($configuredSsid)) { $configuredSsid = 'OneSolution' }
 
+Write-Host "Collecting WiFi diagnostics for configured SSID '$configuredSsid'; report will be written to: $OutputPath" -ForegroundColor Cyan
+
 # 1. Driver capabilities: does the installed WLAN driver actually support the configured
 # authentication/encryption and 802.11w (PMF), which some WPA2/WPA3-transition APs require.
 Add-Section -Title 'WLAN driver capabilities (netsh wlan show drivers)' -Content ((netsh wlan show drivers) -join "`r`n")

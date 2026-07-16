@@ -148,6 +148,7 @@ try {
         }
 
         $port = [int]$smtp.smtp_port
+        Write-Log -Level Info -Message "Sending deployment email to $($toAddresses -join ', ') via $smtpServer`:$port with $(@($attachments).Count) attachment(s) (encryption=$([string]$smtp.encryption_mode), timeout $([int]$smtp.timeout_seconds)s)."
         $client = New-Object System.Net.Mail.SmtpClient($smtpServer, $port)
         try {
             $client.Timeout = [int]$smtp.timeout_seconds * 1000
@@ -170,5 +171,5 @@ try {
         foreach ($tempFile in $tempFiles) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
     }
 } catch {
-    Write-Log -Level Warn -Message "Deployment email notification failed (non-fatal): $($_.Exception.Message)"
+    Write-Log -Level Warn -Message "Deployment email notification failed (non-fatal): $($_.Exception.Message). The deployment itself is unaffected; rerun Deployment\Scripts\Send-DeploymentEmail.ps1 manually to retry once SMTP is reachable."
 }

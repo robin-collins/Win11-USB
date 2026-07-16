@@ -23,6 +23,8 @@ $jsonReport = Join-Path $reportRoot "deployment-report-$runId.json"
 $mdReport = Join-Path $reportRoot "deployment-summary-$runId.md"
 $inventoryPath = Join-Path $reportRoot "asset-inventory-$runId.json"
 
+Write-Log -Level Info -Message "Deployment report generation started for run $runId (status: $(if ($Failure) { 'Failed' } else { 'Success' })); capturing fresh asset inventory first."
+
 $inventory = & (Join-Path $paths.Scripts 'Get-AssetInventory.ps1') -UsbRoot $UsbRoot -OutputPath $inventoryPath
 
 $report = [ordered]@{
@@ -71,7 +73,7 @@ $lines = @(
 )
 
 Set-Content -LiteralPath $mdReport -Value $lines -Encoding UTF8 -Force
-Write-Log -Level Success -Message "Deployment reports written to $reportRoot"
+Write-Log -Level Success -Message "Deployment reports written to $reportRoot (JSON: $(Split-Path -Leaf $jsonReport); summary: $(Split-Path -Leaf $mdReport); inventory: $(Split-Path -Leaf $inventoryPath); status: $($report.status))."
 [ordered]@{
     json_report = $jsonReport
     markdown_report = $mdReport

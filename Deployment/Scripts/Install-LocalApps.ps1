@@ -130,8 +130,13 @@ function Invoke-LocalInstaller {
     }
 }
 
+$apps = @($appConfig.apps)
+Write-Log -Level Info -Message "Local app installation started: $($apps.Count) app(s) configured in $($paths.LocalFile); installers under $($paths.LocalApps)."
+
 $results = @()
-foreach ($app in @($appConfig.apps)) {
+$appIndex = 0
+foreach ($app in $apps) {
+    $appIndex++
     $name = [string]$app.name
     if ([string]::IsNullOrWhiteSpace($name)) { throw 'A local app entry is missing name.' }
     $required = if ($app.ContainsKey('required')) { [bool]$app.required } else { $false }
@@ -152,6 +157,7 @@ foreach ($app in @($appConfig.apps)) {
         Write-Log -Level Error -Message $message
         $results += ,([ordered]@{ name = $name; status = 'MissingInstaller'; required = $required; path = $installerPath })
         if ($required) { throw $message }
+        Write-Log -Level Warn -Message "Continuing without $name because it is not marked required. Copy the installer to $installerPath and rerun this step to install it."
         continue
     }
 
@@ -164,7 +170,7 @@ foreach ($app in @($appConfig.apps)) {
     }
 
     try {
-        Write-Log -Level Info -Message "Installing local app $name from $installerPath."
+        Write-Log -Level Info -Message "Installing local app $name from $installerPath [$appIndex of $($apps.Count)]."
         $install = Invoke-LocalInstaller -InstallerPath $installerPath -InstallerType $installerType -SilentArguments $silentArguments -LogName $logName
         $status = if ($install.exit_code -in @(3010, 1641)) { 'InstalledRebootRequired' } else { 'Installed' }
         $results += ,([ordered]@{ name = $name; status = $status; required = $required; exit_code = $install.exit_code; path = $installerPath })
@@ -174,6 +180,8 @@ foreach ($app in @($appConfig.apps)) {
         Write-Log -Level Error -Message $message
         $results += ,([ordered]@{ name = $name; status = 'Failed'; required = $required; error = $_.Exception.Message; path = $installerPath })
         if ($required -and [bool]$config.fail_on_missing_required_app) { throw $message }
+        $continueReason = if ($required) { 'fail_on_missing_required_app is disabled in deployment_config.json' } else { 'the app is not marked required' }
+        Write-Log -Level Warn -Message "Continuing after failed install of $name because $continueReason. Install it manually or rerun this step after fixing the cause (see $logName)."
     }
 }
 
@@ -181,4 +189,10 @@ if (Test-DeploymentDryRun) {
     Write-DeploymentState -State $state -StatePath $StatePath
 }
 
+$alreadyInstalledCount = @($results | Where-Object { $_.status -eq 'AlreadyInstalled' }).Count
+$installedCount = @($results | Where-Object { $_.status -like 'Installed*' }).Count
+$failedCount = @($results | Where-Object { $_.status -in @('Failed', 'MissingInstaller') }).Count
+$dryRunCount = @($results | Where-Object { $_.status -eq 'DryRun' }).Count
+
 Write-StructuredLog -Level Info -Message 'Local app installation completed' -Data $results
+Write-Log -Level Success -Message "Local app installation completed: $installedCount installed, $alreadyInstalledCount already installed, $failedCount failed/missing installer$(if ($dryRunCount -gt 0) { ", $dryRunCount dry-run" }) of $($apps.Count) app(s)."

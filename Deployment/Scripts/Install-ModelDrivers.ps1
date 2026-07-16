@@ -32,6 +32,7 @@ Write-Log -Level Info -Message "Detected hardware: manufacturer '$($system.Manuf
 if (Test-Path -LiteralPath $driverFolder -PathType Container) {
     $infFiles = @(Get-ChildItem -LiteralPath $driverFolder -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)
     if ($infFiles.Count -gt 0) {
+        Write-Log -Level Info -Message "Model driver folder found: $driverFolder ($($infFiles.Count) INF file(s)); installing."
         Install-InfDriversFromFolder -Folder $driverFolder -LogName 'pnputil-model-drivers.log' | Out-Null
     } else {
         Write-Log -Level Success -Message "Model driver folder exists and is empty. Treating as intentional: $driverFolder"
@@ -69,6 +70,7 @@ do {
 } until ($choice -in @('A', 'B'))
 
 if ($choice -eq 'A') {
+    Write-Log -Level Info -Message "Technician chose to recheck $driverFolder for model drivers."
     Install-InfDriversFromFolder -Folder $driverFolder -LogName 'pnputil-model-drivers.log' | Out-Null
 } else {
     Write-Log -Level Warn -Message "Continuing without offline drivers for $manufacturer\\$model."

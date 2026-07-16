@@ -10,6 +10,8 @@ $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Get-UsbRoot }
 
+Write-Log -Level Info -Message 'Asset inventory capture started (CIM hardware/OS queries, TPM, Secure Boot, BitLocker, activation, installed programs).'
+
 function Get-TpmSummary {
     try {
         $tpm = Get-Tpm -ErrorAction Stop
@@ -22,6 +24,8 @@ function Get-TpmSummary {
             manufacturer_version = $tpm.ManufacturerVersion
         }
     } catch {
+        # Best-effort: recorded as an error in the inventory instead of failing the capture.
+        Write-Log -Level Warn -Message "TPM inventory query failed: $($_.Exception.Message). Recording the error in the inventory and continuing."
         [ordered]@{ error = $_.Exception.Message }
     }
 }
@@ -30,6 +34,8 @@ function Get-SecureBootSummary {
     try {
         [ordered]@{ enabled = [bool](Confirm-SecureBootUEFI -ErrorAction Stop) }
     } catch {
+        # Best-effort: Confirm-SecureBootUEFI throws on legacy-BIOS/unsupported firmware.
+        Write-Log -Level Warn -Message "Secure Boot inventory query failed (expected on legacy BIOS / unsupported firmware): $($_.Exception.Message). Recording the error in the inventory and continuing."
         [ordered]@{ enabled = $null; error = $_.Exception.Message }
     }
 }
@@ -40,6 +46,8 @@ function Get-ActivationSummary {
             Where-Object { $_.PartialProductKey -and $null -ne $_.LicenseStatus } |
             Select-Object Name, Description, LicenseStatus, PartialProductKey
     } catch {
+        # Best-effort: recorded as an error in the inventory instead of failing the capture.
+        Write-Log -Level Warn -Message "Windows activation inventory query failed: $($_.Exception.Message). Recording the error in the inventory and continuing."
         @([ordered]@{ error = $_.Exception.Message })
     }
 }
@@ -75,7 +83,7 @@ $inventory = [ordered]@{
     security = [ordered]@{
         tpm = Get-TpmSummary
         secure_boot = Get-SecureBootSummary
-        bitlocker = try { Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop | Select-Object MountPoint, VolumeStatus, ProtectionStatus, EncryptionPercentage } catch { @([ordered]@{ error = $_.Exception.Message }) }
+        bitlocker = try { Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop | Select-Object MountPoint, VolumeStatus, ProtectionStatus, EncryptionPercentage } catch { Write-Log -Level Warn -Message "BitLocker inventory query failed: $($_.Exception.Message). Recording the error in the inventory and continuing."; @([ordered]@{ error = $_.Exception.Message }) }
     }
     hardware = [ordered]@{
         cpu = if ($cpu) { $cpu.Name } else { '' }
@@ -100,7 +108,9 @@ $inventory = [ordered]@{
 
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
     Write-JsonFile -Path $OutputPath -InputObject $inventory
+    Write-Log -Level Info -Message "Asset inventory written to $OutputPath."
 }
 
 Write-StructuredLog -Level Info -Message 'Asset inventory captured' -Data $inventory
+Write-Log -Level Success -Message "Asset inventory captured for $($inventory.computer.computer_name) (serial $($inventory.computer.serial_number)): $(@($inventory.hardware.disks).Count) disk(s), $(@($inventory.hardware.network_adapters).Count) network adapter(s), $(@($programs).Count) installed program(s), $($inventory.driver_summary.count) signed driver(s)."
 $inventory

@@ -29,6 +29,8 @@ if ($vendorFolders.Count -eq 0) {
     return
 }
 
+Write-Log -Level Info -Message "Network driver installation started: $($vendorFolders.Count) vendor folder(s) under $($paths.NetworkDrivers): $(($vendorFolders | ForEach-Object { $_.Name }) -join ', ')."
+
 $results = @()
 foreach ($vendorFolder in $vendorFolders) {
     $infCount = @(Get-ChildItem -LiteralPath $vendorFolder.FullName -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue).Count
@@ -60,9 +62,13 @@ if ($state) {
     Write-DeploymentState -State $state -StatePath $StatePath
 }
 
+$processedCount = @($results | Where-Object { $_.status -eq 'Processed' }).Count
+$failedCount = @($results | Where-Object { $_.status -eq 'Failed' }).Count
+$emptyVendorCount = $vendorFolders.Count - $results.Count
+
 Write-StructuredLog -Level Info -Message 'Network driver installation completed' -Data $results
-if (@($results | Where-Object { $_.status -eq 'Processed' }).Count -gt 0) {
-    Write-Log -Level Success -Message 'Network driver installation attempted for one or more vendor folders. Adapter availability is verified by the WiFi setup and preflight steps that follow.'
+if ($processedCount -gt 0) {
+    Write-Log -Level Success -Message "Network driver installation completed: $processedCount vendor folder(s) processed, $failedCount failed, $emptyVendorCount skipped (no .inf files). Adapter availability is verified by the WiFi setup and preflight steps that follow."
 } else {
-    Write-Log -Level Info -Message 'No network driver packages were available to install; continuing with inbox drivers.'
+    Write-Log -Level Info -Message "No network driver packages were installed ($failedCount vendor folder(s) failed, $emptyVendorCount had no .inf files); continuing with inbox drivers."
 }

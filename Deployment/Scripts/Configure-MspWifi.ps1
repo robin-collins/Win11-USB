@@ -40,7 +40,7 @@ function ConvertTo-WlanXmlText {
 
 $wifi = Get-MspWifiConfig -Config $config
 if (-not [bool]$wifi.enabled) {
-    Write-Log -Level Info -Message 'MSP WiFi setup is disabled by config.'
+    Write-Log -Level Info -Message 'MSP WiFi setup is disabled by config (msp_wifi_setup.enabled=false); skipping. Preflight will still verify internet connectivity.'
     return
 }
 
@@ -67,6 +67,9 @@ if ($usePrimaryProfileFile) {
 $passwordEnvVar = [string]$wifi.password_env_var
 if ([string]::IsNullOrWhiteSpace($passwordEnvVar)) { $passwordEnvVar = 'OSIT_WIFI_PASSWORD' }
 if (-not $usePrimaryProfileFile -and $passwordEnvVar -ne 'OSIT_WIFI_PASSWORD') { Write-Log -Level Warn -Message "Custom WiFi password variable '$passwordEnvVar' configured; OSIT_WIFI_PASSWORD remains the documented standard." }
+
+$profileSource = if ($usePrimaryProfileFile) { "primary profile file $primaryProfilePath" } else { 'msp_wifi_setup config' }
+Write-Log -Level Info -Message "MSP WiFi setup started: target SSID '$ssid' (source: $profileSource)."
 
 $connectedSsid = Get-ConnectedWifiSsid
 if ($connectedSsid -eq $ssid) {
@@ -205,6 +208,7 @@ if ($usePrimaryProfileFile) {
     # working when it was exported, so there is no discrete "wrong auth type" configuration
     # mistake to retry around the way there can be for the config-built profile below -- if this
     # fails, the network itself is the problem (out of range, key rotated since export, etc.).
+    Write-Log -Level Info -Message "Importing primary WLAN profile for '$ssid' from $primaryProfilePath and connecting (timeout ${timeout}s)."
     $connected = Import-WlanProfileFile -ProfileXmlPath $primaryProfilePath -Ssid $ssid -Connect -ConnectTimeoutSeconds $timeout
     $usedAuthentication = 'FromProfileFile'
     if (-not $connected) {
@@ -212,6 +216,7 @@ if ($usePrimaryProfileFile) {
         throw "Timed out waiting for primary WiFi SSID '$ssid' (imported from $primaryProfilePath) to connect within $timeout second(s). Verify the network is in range and the profile's saved key is still correct."
     }
 } else {
+    Write-Log -Level Info -Message "Creating WLAN profile for '$ssid' ($authentication/$encryption) and connecting (timeout ${timeout}s)."
     $connected = Connect-MspWifiProfile -Ssid $ssid -Authentication $authentication -Encryption $encryption -Password $wifiPassword -TimeoutSeconds $timeout
     $usedAuthentication = $authentication
 

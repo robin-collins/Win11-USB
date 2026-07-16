@@ -74,6 +74,8 @@ if ([string]::IsNullOrWhiteSpace($Ssid)) {
     }
 }
 
+Write-Host "Capturing WiFi settings for SSID '$Ssid'; full report will be written to: $OutputPath" -ForegroundColor Cyan
+
 $sections = New-Object System.Collections.Generic.List[string]
 function Add-Section {
     param([string]$Title, [string]$Content)

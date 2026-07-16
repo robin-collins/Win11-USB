@@ -41,13 +41,15 @@ function Test-DattoRmmInstalled {
 
 $siteId = ([string]$config.datto_rmm_site_id_uuid).Trim()
 if ([string]::IsNullOrWhiteSpace($siteId)) {
-    Write-Log -Level Info -Message 'Datto RMM site ID is not configured; skipping Datto RMM install.'
+    Write-Log -Level Info -Message 'Datto RMM site ID is not configured (datto_rmm_site_id_uuid is empty in deployment_config.json); skipping Datto RMM install. Set it and rerun to install the agent.'
     return
 }
 
 if (-not (Test-DattoSiteUuid -SiteId $siteId)) {
     throw "datto_rmm_site_id_uuid is not a valid UUID: '$siteId'"
 }
+
+Write-Log -Level Info -Message "Datto RMM install step started for site $siteId (required=$([bool]$config.datto_rmm_required))."
 
 if (Test-DattoRmmInstalled) {
     Write-Log -Level Success -Message 'Datto RMM agent already appears to be installed.'
@@ -99,6 +101,7 @@ try {
         "Path: $installerPath",
         "SizeBytes: $((Get-Item -LiteralPath $installerPath).Length)"
     ) -Encoding UTF8 -Force
+    Write-Log -Level Info -Message "Datto RMM agent downloaded to $installerPath ($([math]::Round((Get-Item -LiteralPath $installerPath).Length / 1MB, 1)) MB)."
 } catch {
     throw "Failed to download Datto RMM agent from $downloadUrl`: $($_.Exception.Message)"
 }
@@ -196,6 +199,9 @@ try {
 $installedAfter = Test-DattoRmmInstalled
 if (-not $installedAfter -and [bool]$config.datto_rmm_required) {
     throw 'Datto RMM installer completed but the Datto/CentraStage service or installed program was not detected.'
+}
+if (-not $installedAfter) {
+    Write-Log -Level Warn -Message 'Datto RMM installer completed but the agent service/program is not detected yet; continuing because datto_rmm_required is false. The install may still be finishing in the background -- verify the device appears in the Datto RMM portal, or rerun this step.'
 }
 
 $result = [ordered]@{

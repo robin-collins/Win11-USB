@@ -71,6 +71,8 @@ if ($wirelessAdapters.Count -eq 0) {
 $timeout = [int]$config.additional_wifi_profiles_connect_timeout_seconds
 if ($timeout -lt 5) { $timeout = 5 }
 
+Write-Log -Level Info -Message "Additional WiFi profile import started: $($secondaryProfiles.Count) secondary profile(s) in $profilesFolder; primary SSID '$primarySsid'; per-profile verify timeout ${timeout}s."
+
 if (Test-DeploymentDryRun) {
     foreach ($profileFile in $secondaryProfiles) {
         $profileSsid = $profileFile.BaseName
@@ -149,5 +151,9 @@ if ($state) {
     Write-DeploymentState -State $state -StatePath $StatePath
 }
 
+$verifiedCount = @($results | Where-Object { $_.status -eq 'ImportedAndVerified' }).Count
+$unverifiedCount = @($results | Where-Object { $_.status -eq 'ImportedNotVerified' }).Count
+$invalidCount = @($results | Where-Object { $_.status -eq 'InvalidProfile' }).Count
+
 Write-StructuredLog -Level Info -Message 'Additional WiFi profile import completed' -Data $summary
-Write-Log -Level Success -Message "Additional WiFi profile import completed: $($results.Count) profile(s) processed."
+Write-Log -Level Success -Message "Additional WiFi profile import completed: $verifiedCount verified, $unverifiedCount imported but not verified (network likely out of range), $invalidCount invalid profile file(s); back on primary '$primarySsid': $reconnectedToPrimary."
