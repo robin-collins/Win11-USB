@@ -40,12 +40,19 @@ function Initialize-WingetCommand {
     if ($winget) { return $winget }
 
     try {
-        # -Force alone still shows the interactive "Do you want PowerShellGet to install and
-        # import the NuGet provider now? [Y] Yes [N] No" prompt on a fresh Windows install with
-        # no NuGet provider yet; -ForceBootstrap is the flag that actually suppresses it.
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+        # Asking for a MISSING provider by name (Get-PackageProvider -Name NuGet) makes
+        # PackageManagement itself offer to download it via an interactive "Would you like
+        # PackageManagement to automatically download and install 'nuget' now?" prompt --
+        # -ErrorAction suppresses errors, not host prompts, so that existence check is what
+        # stalled an unattended run in the field (see Install-WindowsUpdates.ps1, same fix).
+        # -ListAvailable enumerates installed providers without triggering the offer.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $nugetProvider = @(Get-PackageProvider -ListAvailable -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'NuGet' })
+        if ($nugetProvider.Count -eq 0) {
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
+            # The freshly installed provider is not visible to this session until imported
+            # explicitly; without this the very next Install-Module can re-prompt.
+            Import-PackageProvider -Name NuGet -Force -ErrorAction SilentlyContinue | Out-Null
         }
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
         if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {

@@ -223,14 +223,20 @@ if (-not $SkipModuleInstall) {
     Write-Host ''
     Write-Host '=== PowerShell modules (PSScriptAnalyzer, Pester) ===' -ForegroundColor Cyan
 
-    # Fixes the exact "Do you want PowerShellGet to install and import the NuGet provider now?
-    # [Y] Yes [N] No" prompt this session already found and fixed in
-    # Install-WindowsUpdates.ps1/Install-WingetApps.ps1 -- -Force alone does not suppress it on
-    # a fresh machine with no NuGet provider yet; -ForceBootstrap is the flag that does.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+    # Asking for a MISSING provider by name (Get-PackageProvider -Name NuGet) makes
+    # PackageManagement itself offer to download it via an interactive "Would you like
+    # PackageManagement to automatically download and install 'nuget' now?" prompt --
+    # -ErrorAction suppresses errors, not host prompts (field-confirmed in the WindowsUpdates
+    # step; same fix as Install-WindowsUpdates.ps1/Install-WingetApps.ps1).
+    # -ListAvailable enumerates installed providers without triggering the offer.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $nugetProvider = @(Get-PackageProvider -ListAvailable -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'NuGet' })
+    if ($nugetProvider.Count -eq 0) {
         Write-Host 'Bootstrapping the NuGet package provider...' -ForegroundColor Yellow
         Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ForceBootstrap -Confirm:$false -ErrorAction Stop | Out-Null
+        # The freshly installed provider is not visible to this session until imported
+        # explicitly; without this the very next Install-Module can re-prompt.
+        Import-PackageProvider -Name NuGet -Force -ErrorAction SilentlyContinue | Out-Null
     }
     Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
 
