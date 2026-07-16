@@ -18,13 +18,13 @@ flowchart TD
   E --> F
   F --> G["OSIT logs on once"]
   G --> H["Start-Deployment.ps1 opens from the USB"]
-  H --> H2["Network/WiFi driver install attempt"]
+  H --> I2{"local_deployment_handover enabled?"}
+  I2 -->|"Yes"| I3["Copy Deployment files to C:\1S-WIN11 immediately (no network needed) and continue from local disk; USB can be ejected"]
+  I2 -->|"No"| H2["Network/WiFi driver install attempt"]
+  I3 --> H2
   H2 --> H3["MSP WiFi connect if needed"]
   H3 --> I["Preflight checks"]
-  I --> I2{"local_deployment_handover enabled and network available?"}
-  I2 -->|"Yes"| I3["Copy Deployment files to C:\1S-WIN11 and continue from local disk; USB can be ejected"]
-  I2 -->|"No"| J["Computer name and local admin prompts if configured"]
-  I3 --> J
+  I --> J["Computer name and local admin prompts if configured"]
   J --> K["Power settings"]
   K --> L["Windows Updates"]
   L --> M["Model driver check"]
@@ -57,7 +57,7 @@ Expect these interaction points:
 - Reboots during rename or Windows Update are normal. The scheduled task resumes the same deployment on next logon.
 - If a model driver folder is missing, the script creates the exact folder and lets the technician copy drivers and recheck, or continue without extra offline drivers.
 - App installers only run when configured. Required app failures stop the run; optional app failures are logged.
-- When `local_deployment_handover.enabled=true`, the toolkit copies itself to `C:\1S-WIN11` (or the configured `local_path`) right after Preflight, once WiFi or Ethernet connectivity is available, and continues the rest of the deployment from there. The console and a toast notification confirm when it is safe to eject the USB and move it to the next device.
+- When `local_deployment_handover.enabled=true`, the toolkit copies itself to `C:\1S-WIN11` (or the configured `local_path`) as the very first step, before any network or driver work (no connectivity is required), and runs the entire rest of the deployment from there. The console and a toast notification confirm within the first minute when it is safe to eject the USB and move it to the next device.
 - When `smtp_config.json` is enabled, the deployment report, Markdown summary, asset inventory, and a zip of the run's logs are emailed to the configured recipients at the end of the run (and on failure).
 - The final screen and report confirm that customer identity onboarding has not been performed.
 
@@ -141,7 +141,7 @@ Important `deployment_config.json` options:
 - `require_internet`: fail preflight when Windows Update and winget cannot reach the internet.
 - `msp_wifi_setup`: connects to MSP WiFi SSID `OneSolution` before preflight internet checks. Password comes from `OSIT_WIFI_PASSWORD`, unless `Deployment\WifiProfiles\Primary.xml` exists, in which case that exported profile is imported directly instead. The step is skipped automatically when the device already has internet (for example Ethernet) or has no wireless adapter.
 - `configure_additional_wifi_profiles` / `additional_wifi_profiles_connect_timeout_seconds`: imports every other WLAN profile XML in `Deployment\WifiProfiles\` (besides `Primary.xml`) after driver installation, verifying each on a best-effort basis, then switches back to the primary network. See "Additional WiFi Profiles" below.
-- `local_deployment_handover`: when `enabled=true`, copies the deployment to `local_path` (default `C:\1S-WIN11`) once network is available and continues the rest of the deployment from there, so the USB can be ejected early. Default is `false`. See "Local Deployment Handover" below.
+- `local_deployment_handover`: when `enabled=true`, copies the deployment to `local_path` (default `C:\1S-WIN11`) as the very first step (no network required) and continues the rest of the deployment from there, so the USB can be ejected within the first minute. Default is `false`. See "Local Deployment Handover" below.
 - `windows_update_max_cycles`: maximum update/reboot scan cycles. Default is `5`.
 - `computer_name_mode`: `prompt`, `serial`, `prefix_serial`, or `skip`.
 - `configure_power_settings`: sets power timeouts before long-running update and install stages.
@@ -413,15 +413,15 @@ Local installers are never run just because they exist. They must be explicitly 
 
 ## Local Deployment Handover (Eject The USB Early)
 
-By default the toolkit runs entirely from the USB for the whole deployment, exactly as before. Setting `local_deployment_handover.enabled=true` in `deployment_config.json` adds a `LocalHandover` step, which runs right after `Preflight` (once WiFi or Ethernet connectivity has been established) and before the computer name/local admin steps:
+By default the toolkit runs entirely from the USB for the whole deployment, exactly as before. Setting `local_deployment_handover.enabled=true` in `deployment_config.json` adds a `LocalHandover` step, which runs first (before network/WiFi driver installation, MSP WiFi connect, and `Preflight`) and needs no network connection: it is a local USB-to-disk copy, and `require_network` defaults to `false`. It:
 
 1. Copies the entire `Deployment` folder (Config, Scripts, Apps, Drivers, Tools, and the current run's State/Logs/Reports) plus the USB-root `.env` to `local_deployment_handover.local_path` (default `C:\1S-WIN11`) using `robocopy`.
-2. Verifies the copy landed correctly, then switches the running deployment, its logging, and the resume scheduled task over to the local copy.
+2. Verifies the copy landed correctly, then switches the running deployment, its logging, the resume scheduled task, and the technician Resume/Status desktop shortcuts over to the local copy.
 3. Logs success and shows a toast confirming the USB can now be safely ejected.
 
-Every remaining step — computer name, local admin, power settings, Windows Updates, drivers, winget/local apps, Datto RMM, desktop cleanup, reports, and email — then runs from the local copy. If a reboot is required later in the run, the resume scheduled task and automatic logon both point at the local copy, not the USB, so ejecting it beforehand does not break resume.
+Every remaining step — network/WiFi drivers, MSP WiFi, preflight, computer name, local admin, power settings, Windows Updates, drivers, winget/local apps, Datto RMM, desktop cleanup, reports, and email — then runs from the local copy. If a reboot is required later in the run, the resume scheduled task and automatic logon both point at the local copy, not the USB, so ejecting it beforehand does not break resume.
 
-If no network connection is available yet when `LocalHandover` runs, the step is skipped (not failed) and the deployment simply continues entirely from the USB, same as with `local_deployment_handover.enabled=false`.
+Handover needs no network, so it is never skipped for connectivity reasons by default. If a site opts back in to the old gating with `require_network=true`, handover is skipped (not failed) when no network connection is available at that moment (and since `LocalHandover` runs before any network/WiFi step, that effectively means always skipped on WiFi-only devices); the deployment then simply continues entirely from the USB, same as with `local_deployment_handover.enabled=false`.
 
 This is disabled by default. Enable it once you are ready to have technicians eject the USB partway through a deployment and reuse it on the next device.
 
@@ -498,7 +498,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Deployment\Scripts\Sta
 
 What still runs for real: every detection, scan, and validation step, exactly as in a real deployment. Preflight checks, Windows Update scans, winget package detection, driver `.inf` enumeration, asset inventory collection, and the `Complete` step's credential-scrub preview all run against the real machine, because that detection is the actual value of a dry run.
 
-What never happens: no computer rename, no local user creation, no scheduled task registration, no automatic-logon registry changes, no WLAN profile changes, no driver installs, no app installs/updates, no reboot, and no email send. Every one of those is replaced by a log line prefixed `DRYRUN` and an entry in the run's `dryrun_actions` audit trail. A step that would normally request a reboot instead records the request and lets the dry run continue straight on to the next step, so one pass always walks every step in `Get-DeploymentSteps` order.
+What never happens: no computer rename, no local user creation, no scheduled task registration, no desktop shortcut creation/removal, no automatic-logon registry changes, no WLAN profile changes, no driver installs, no app installs/updates, no reboot, and no email send. Every one of those is replaced by a log line prefixed `DRYRUN` and an entry in the run's `dryrun_actions` audit trail. A step that would normally request a reboot instead records the request and lets the dry run continue straight on to the next step, so one pass always walks every step in `Get-DeploymentSteps` order.
 
 Dry run never touches a real deployment's state or logs. It reads and writes its own shadow files instead:
 
@@ -520,10 +520,12 @@ A `dryrun-smoke` job in `.github/workflows/ci.yml` runs `Start-Deployment.ps1 -D
 
 ## Resume And Reboot Handling
 
-The toolkit registers a scheduled task named `OneSolutionWin11DeploymentResume` when a reboot is required. Repeated runs use the same task name and replace it rather than creating duplicates. The task has two triggers:
+The toolkit maintains a scheduled task named `OneSolutionWin11DeploymentResume` under the `\1S-WIN11` Task Scheduler folder, with a plain-language description explaining what it does, that the 1S-WIN11 deployment toolkit created it, and that it is removed automatically when the deployment completes. Repeated registrations use the same task name and replace it rather than creating duplicates. The task is registered at two points, with two trigger profiles:
 
-- an at-logon trigger, which fires as soon as the account is logged on.
-- a 5-minute recurring backstop trigger, so the deployment still resumes promptly even if the logon trigger does not fire for some reason (for example, a session restore path that does not generate a fresh logon event).
+- **At every run start**, before the first step runs: an at-logon trigger plus an hourly recurring retry (for up to 14 days). This is an always-on safety net: if the deployment fails at any step (for example a missing WiFi driver stops `MspWifiSetup`), the retry re-runs it every hour, so fixing the blocker (plugging in Ethernet, dropping a driver into the toolkit) lets the deployment recover on its own from the last completed step.
+- **When a reboot is required mid-run**: an at-logon trigger plus a 5-minute recurring backstop (for up to 3 days), so the deployment resumes promptly after the reboot even if the logon trigger does not fire for some reason (for example, a session restore path that does not generate a fresh logon event). Once the resumed run starts, its own run-start registration re-arms the hourly profile.
+
+Alongside the run-start registration, two shortcuts are created on the common desktop and kept pointing at the current deployment root (re-targeted to `C:\1S-WIN11` after a local handover): `Resume 1S-WIN11 Deployment.lnk`, which relaunches the deployment elevated from the last completed step, and `1S-WIN11 Deployment Status.lnk`, which opens the read-only status view. The `DesktopItems` cleanup step always preserves both while the deployment is incomplete; the `Complete` step removes them along with the scheduled task (and the `\1S-WIN11` scheduler folder, once empty).
 
 Both triggers are bound to the account by SID rather than by `ComputerName\Username`, so the task keeps matching the account even if the same reboot also renames the computer (a common first reboot, since `ConfigureComputerName` runs early).
 
@@ -585,7 +587,7 @@ Key deployment moments show a Windows toast notification to the interactively lo
 7. Boot the target notebook from the USB.
 8. Install Windows 11 Pro using the technician-led setup flow, or let `wipe_repartition_drive=true` wipe and target disk 0 automatically.
 9. Let `Autounattend.xml` bypass OOBE network/account blocking and launch the deployment script.
-10. If `local_deployment_handover.enabled=true`, wait for the toast/console confirmation that files were copied to the local disk, then eject the USB.
+10. If `local_deployment_handover.enabled=true`, wait for the toast/console confirmation (within the first minute, before drivers or updates run) that files were copied to the local disk, then eject the USB.
 11. Follow prompts for computer name, local admin password, and any missing driver folder decision.
 12. Review the final report, delivered by email too if `smtp_config.json` is enabled.
 13. Perform final customer onboarding manually: domain join, Entra join, Autopilot/Intune, customer apps, and handover steps.
