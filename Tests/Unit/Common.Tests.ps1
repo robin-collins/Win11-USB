@@ -668,3 +668,25 @@ Describe 'Deployment state round-trip: New-DeploymentState -> Write-DeploymentSt
         $read.deployment_run_id | Should -Be 'run-v1'
     }
 }
+
+Describe 'Get-DeploymentSteps ordering and handover defaults (resilience contract)' {
+    It 'runs LocalHandover as the very first step, before anything network-dependent' {
+        # The USB-to-local-disk copy needs no connectivity and must happen before any step
+        # that could fail on a missing network driver, so the USB can be ejected within the
+        # first minute of a run. Start-Deployment.ps1's root-switch block keys off this step
+        # by name, so moving it must never silently reorder it behind a network step again.
+        (Get-DeploymentSteps)[0] | Should -Be 'LocalHandover'
+    }
+
+    It 'keeps Complete as the final step' {
+        $steps = @(Get-DeploymentSteps)
+        $steps[$steps.Count - 1] | Should -Be 'Complete'
+    }
+
+    It 'defaults local_deployment_handover.require_network to false' {
+        # Handover is a local copy that runs before any network/WiFi work; gating it on
+        # connectivity would effectively always skip it on WiFi-only devices.
+        $config = Get-DefaultDeploymentConfig
+        $config.local_deployment_handover.require_network | Should -BeFalse
+    }
+}

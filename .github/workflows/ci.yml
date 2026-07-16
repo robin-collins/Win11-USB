@@ -245,8 +245,17 @@ jobs:
           $ositUser = Get-LocalUser -Name 'OSIT' -ErrorAction SilentlyContinue
           if ($ositUser) { $failures += 'A local user named OSIT exists -- CreateLocalAdmin mutated the runner.' }
 
+          # Get-ScheduledTask -TaskName searches every scheduler folder, so this also covers
+          # the '\1S-WIN11\' folder the task is registered under in a real run.
           $resumeTask = Get-ScheduledTask -TaskName 'OneSolutionWin11DeploymentResume' -ErrorAction SilentlyContinue
-          if ($resumeTask) { $failures += 'The resume scheduled task is registered -- Request-DeploymentReboot mutated the runner.' }
+          if ($resumeTask) { $failures += 'The resume scheduled task is registered -- the run-start safety net or Request-DeploymentReboot mutated the runner.' }
+
+          $commonDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          foreach ($shortcutName in @('Resume 1S-WIN11 Deployment.lnk', '1S-WIN11 Deployment Status.lnk')) {
+            if ($commonDesktop -and (Test-Path -LiteralPath (Join-Path $commonDesktop $shortcutName))) {
+              $failures += "Deployment desktop shortcut '$shortcutName' exists -- Install-DeploymentDesktopShortcuts mutated the runner."
+            }
+          }
 
           $activeNameKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName'
           $currentComputerName = (Get-ItemProperty -LiteralPath $activeNameKey -Name ComputerName).ComputerName
@@ -263,4 +272,4 @@ jobs:
             $failures | ForEach-Object { Write-Output "MUTATION CHECK FAILED: $_" }
             exit 1
           }
-          Write-Output 'Zero-mutation checks passed: no OSIT local user, no resume scheduled task, computer name unchanged, and only the shadow state file was written.'
+          Write-Output 'Zero-mutation checks passed: no OSIT local user, no resume scheduled task, no deployment desktop shortcuts, computer name unchanged, and only the shadow state file was written.'

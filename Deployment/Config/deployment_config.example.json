@@ -85,7 +85,7 @@
   "local_deployment_handover": {
     "enabled": false,
     "local_path": "C:\\1S-WIN11",
-    "require_network": true
+    "require_network": false
   },
   "stop_before_domain_join": true,
   "fail_on_missing_required_app": true,

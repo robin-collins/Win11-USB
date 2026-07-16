@@ -449,6 +449,10 @@ function Invoke-DeploymentStep {
         'EmailReport' { & (Join-Path $PSScriptRoot 'Send-DeploymentEmail.ps1') -UsbRoot $UsbRoot -StatePath $StatePath }
         'Complete' {
             Unregister-DeploymentResumeTask -State $State
+            # Dual-mode like Unregister-DeploymentResumeTask above: removes the technician
+            # Resume/Status desktop shortcuts for real, or records a would-remove/not-present
+            # preview action per shortcut in a dry run.
+            Remove-DeploymentDesktopShortcuts -State $State -Step 'Complete'
             $unattendPaths = @(
                 "$env:windir\Panther\unattend.xml",
                 "$env:windir\Panther\Autounattend.xml",
@@ -553,6 +557,19 @@ try {
     $config = Get-DeploymentConfig -UsbRoot $UsbRoot
     $steps = Get-DeploymentSteps
 
+    # Resilience safety net, armed before ANY step runs: register the resume task with the
+    # hourly RunStart trigger profile and create the technician Resume/Status desktop
+    # shortcuts now, so a failure at any later step (for example MspWifiSetup dying on a
+    # missing WiFi driver) already leaves an automatic hourly retry and manual entry points
+    # behind. Re-registered on every run start so the resume path always points at the
+    # current deployment root. Both helpers are dry-run-gated internally (a dry run only
+    # records would-register/would-create actions; nothing real is registered or created).
+    Register-DeploymentResumeTask -UsbRoot $UsbRoot -State $state -TriggerProfile 'RunStart'
+    Install-DeploymentDesktopShortcuts -UsbRoot $UsbRoot -State $state
+    # Persist any dry-run actions the two calls above appended in memory: the step loop below
+    # re-reads state from disk at the top of every step, discarding this in-memory object.
+    Write-DeploymentState -State $state -StatePath $paths.StateFile
+
     $startMessage = if (@($state.completed_steps).Count -gt 0) { "Resuming from last successful step: $($state.last_successful_step)" } else { 'Deployment started' }
     Write-Log -Level Info -Message $startMessage
     Show-DeploymentToast -Title 'Windows 11 Deployment' -Message "$startMessage on $env:COMPUTERNAME."
@@ -609,6 +626,11 @@ try {
                     $paths = $newPaths
                     $config = Get-DeploymentConfig -UsbRoot $UsbRoot
                     Initialize-DeploymentLogging -UsbRoot $UsbRoot -State $state | Out-Null
+                    # Re-point the resume safety net and the technician desktop shortcuts at
+                    # the local copy so an automatic retry or manual resume never depends on
+                    # the (about to be ejected) USB.
+                    Register-DeploymentResumeTask -UsbRoot $UsbRoot -State $state -TriggerProfile 'RunStart'
+                    Install-DeploymentDesktopShortcuts -UsbRoot $UsbRoot -State $state
                     Write-Log -Level Success -Message "Deployment root switched to $UsbRoot after local handover. Remaining steps and resumes now use this path; the USB can be ejected."
                     Show-DeploymentToast -Title 'Windows 11 Deployment' -Message 'Deployment moved to local disk. The USB can now be ejected.'
                 }

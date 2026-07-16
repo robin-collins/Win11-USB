@@ -20,7 +20,10 @@ function Get-LocalHandoverConfig {
     $settings = @{
         enabled = $false
         local_path = 'C:\1S-WIN11'
-        require_network = $true
+        # Handover is a local USB-to-disk copy that runs as the deployment's very first step,
+        # before any network/WiFi work, so it needs no connectivity (matches
+        # Get-DefaultDeploymentConfig in Common.ps1).
+        require_network = $false
     }
 
     if ($Config.ContainsKey('local_deployment_handover') -and $null -ne $Config.local_deployment_handover) {
@@ -56,9 +59,10 @@ if ($resolvedCurrent -ieq $normalizedTarget) {
     return
 }
 
-# A wired or already-connected machine has network the moment NetworkDrivers/MspWifiSetup
-# finish, same signal Preflight uses; treat "no network yet" as a reason to skip rather than
-# fail, so a device that is genuinely offline simply keeps running deployment from the USB.
+# Handover runs as the very first step and needs no connectivity, so require_network defaults
+# to $false. If a site opts back in (require_network=true), "no network yet" is treated as a
+# reason to skip rather than fail, so a device that is offline at this point simply keeps
+# running the deployment from the USB; handover is not retried later in the run.
 if ([bool]$handover.require_network -and -not (Test-InternetConnectivity)) {
     Write-Log -Level Warn -Message 'Local deployment handover is enabled but no network connection is currently available; continuing to run from the current deployment root without handover.'
     return

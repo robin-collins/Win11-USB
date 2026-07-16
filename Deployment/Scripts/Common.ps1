@@ -6,6 +6,16 @@ Set-StrictMode -Version 2.0
 
 $script:DeploymentVolumeLabel = '1S-WIN11'
 $script:DeploymentTaskName = 'OneSolutionWin11DeploymentResume'
+# All toolkit scheduled tasks live under this Task Scheduler folder so a technician can find
+# (and recognise) them in one place instead of the crowded root folder. The folder itself is
+# removed by Unregister-DeploymentResumeTask once its last task is unregistered.
+$script:DeploymentTaskFolderName = '1S-WIN11'
+$script:DeploymentTaskPath = '\' + $script:DeploymentTaskFolderName + '\'
+# Technician desktop shortcuts created at run start by Install-DeploymentDesktopShortcuts and
+# removed by the Complete step; Configure-DesktopItems.ps1 treats both names as always-approved
+# so a desktop sync never strips them from a still-running deployment.
+$script:DeploymentResumeShortcutFileName = 'Resume 1S-WIN11 Deployment.lnk'
+$script:DeploymentStatusShortcutFileName = '1S-WIN11 Deployment Status.lnk'
 $script:DeploymentRunMutexName = 'Global\OneSolutionWin11Deployment'
 $script:DeploymentLogContext = $null
 $script:PrimaryWifiProfileFileName = 'Primary.xml'
@@ -74,10 +84,14 @@ function Write-DryRunAction {
 
 function Get-DeploymentSteps {
     @(
+        # LocalHandover runs first, before anything network-dependent: copying USB -> local disk
+        # needs no connectivity, and doing it immediately means the USB can be ejected within
+        # the first minute of the run and every later step (including network/WiFi driver
+        # installation) already executes from the local copy.
+        'LocalHandover',
         'NetworkDrivers',
         'MspWifiSetup',
         'Preflight',
-        'LocalHandover',
         'ConfigureComputerName',
         'CreateLocalAdmin',
         'PowerSettings',
@@ -387,7 +401,9 @@ function Get-DefaultDeploymentConfig {
         local_deployment_handover        = @{
             enabled = $false
             local_path = 'C:\1S-WIN11'
-            require_network = $true
+            # Handover is a local USB-to-disk copy that runs as the very first step, before any
+            # network/WiFi work, so it needs no connectivity and does not wait for any.
+            require_network = $false
         }
         stop_before_domain_join          = $true
         fail_on_missing_required_app     = $true
@@ -991,8 +1007,24 @@ function Invoke-ExternalCommand {
     if (-not [string]::IsNullOrEmpty($argumentLine)) { $startParams.ArgumentList = $argumentLine }
     $process = Start-Process @startParams
 
-    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { '' }
+    # [System.IO.File]::ReadAllText instead of Get-Content -Raw, deliberately: Get-Content
+    # attaches provider ETS note properties (PSPath/PSDrive/PSProvider/...) to the returned
+    # string, and Write-StructuredLog's ConvertTo-Json -Depth 12 below then serialises that
+    # entire provider/session-state object graph instead of a plain string. On hosts with a
+    # large drive/provider list this was observed to burn minutes of CPU and gigabytes of
+    # memory (effectively hanging the Complete step's dry-run WLAN profile check, the one
+    # Invoke-ExternalCommand call that runs inline in the orchestrator where the structured
+    # log context is live). ReadAllText returns a bare [string] with no ETS attached.
+    $stdout = ''
+    $stderr = ''
+    try {
+        if (Test-Path -LiteralPath $stdoutPath) { $stdout = [System.IO.File]::ReadAllText($stdoutPath) }
+        if (Test-Path -LiteralPath $stderrPath) { $stderr = [System.IO.File]::ReadAllText($stderrPath) }
+    } catch {
+        # Mirrors the old Get-Content -ErrorAction SilentlyContinue behaviour: an unreadable
+        # redirect file loses that stream's captured text but never fails the command itself.
+        Write-Verbose "Could not read redirected output (non-fatal): $($_.Exception.Message)"
+    }
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
     $result = [ordered]@{
@@ -1230,6 +1262,14 @@ function Register-DeploymentResumeTask {
     param(
         [Parameter(Mandatory = $true)][string]$UsbRoot,
         [string]$TriggerUsername,
+        # Two trigger shapes for the same task name (last registration wins via -Force):
+        #   PostReboot -- at-logon plus a 5-minute repetition for 3 days: fast resume right
+        #     after a deployment-requested reboot (Request-DeploymentReboot).
+        #   RunStart   -- at-logon plus a 60-minute repetition for 14 days: the always-on
+        #     hourly retry safety net Start-Deployment.ps1 arms before its first step, so a
+        #     failure at ANY later step leaves an automatic retry behind. When a reboot-resume
+        #     starts a new run, the run-start registration re-arms this hourly profile.
+        [ValidateSet('PostReboot', 'RunStart')][string]$TriggerProfile = 'PostReboot',
         [hashtable]$State
     )
 
@@ -1242,10 +1282,12 @@ function Register-DeploymentResumeTask {
     if ([string]::IsNullOrWhiteSpace($TriggerUsername)) { $TriggerUsername = $env:USERNAME }
 
     if (Test-DeploymentDryRun) {
-        Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'ResumeTask') -Action "would register resume scheduled task '$script:DeploymentTaskName' for '$TriggerUsername'" -Data ([ordered]@{
+        Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'ResumeTask') -Action "would register resume scheduled task '$script:DeploymentTaskName' ($TriggerProfile trigger profile) for '$TriggerUsername'" -Data ([ordered]@{
                 usb_root         = $UsbRoot
                 trigger_username = $TriggerUsername
+                trigger_profile  = $TriggerProfile
                 resume_script    = $resumeScript
+                task_path        = $script:DeploymentTaskPath
             })
         return
     }
@@ -1278,15 +1320,23 @@ function Register-DeploymentResumeTask {
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $resumeArguments
 
     # The AtLogOn trigger is the primary path (fires immediately once someone is logged on).
-    # The recurring trigger is a backstop so the deployment resumes within a few minutes even
-    # if automatic logon does not occur for some reason and no technician is present to log
-    # on manually, instead of waiting indefinitely for a fresh logon event.
+    # The recurring trigger is a backstop so the deployment resumes on its own even if
+    # automatic logon does not occur for some reason and no technician is present to log on
+    # manually, instead of waiting indefinitely for a fresh logon event. Its cadence depends
+    # on the trigger profile (see the -TriggerProfile parameter comment above).
     $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
-    $backstopTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3)
+    if ($TriggerProfile -eq 'RunStart') {
+        $backstopTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(60) -RepetitionInterval (New-TimeSpan -Minutes 60) -RepetitionDuration (New-TimeSpan -Days 14)
+        $backstopSummary = 'logon trigger plus an hourly retry for 14 days'
+    } else {
+        $backstopTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3)
+        $backstopSummary = 'logon trigger plus a 5-minute backstop check for 3 days'
+    }
 
+    $taskDescription = 'Resumes the 1S-WIN11 Windows 11 deployment from the last completed step (at logon and on a recurring schedule) if it was interrupted by a reboot, failure, or fixed blocker such as a missing network driver. Created by Start-Deployment.ps1; removed automatically when the deployment completes.'
     $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
-    Register-ScheduledTask -TaskName $script:DeploymentTaskName -Action $action -Trigger @($logonTrigger, $backstopTrigger) -Principal $principal -Force -ErrorAction Stop | Out-Null
-    Write-Log -Level Success -Message "Resume scheduled task is registered for '$TriggerUsername': $script:DeploymentTaskName (logon trigger plus a 5-minute backstop check)"
+    Register-ScheduledTask -TaskName $script:DeploymentTaskName -TaskPath $script:DeploymentTaskPath -Description $taskDescription -Action $action -Trigger @($logonTrigger, $backstopTrigger) -Principal $principal -Force -ErrorAction Stop | Out-Null
+    Write-Log -Level Success -Message "Resume scheduled task is registered for '$TriggerUsername': $script:DeploymentTaskPath$script:DeploymentTaskName ($backstopSummary)"
 }
 
 function Unregister-DeploymentResumeTask {
@@ -1299,12 +1349,170 @@ function Unregister-DeploymentResumeTask {
     }
 
     try {
-        if (Get-ScheduledTask -TaskName $script:DeploymentTaskName -ErrorAction SilentlyContinue) {
-            Unregister-ScheduledTask -TaskName $script:DeploymentTaskName -Confirm:$false -ErrorAction Stop
-            Write-Log -Level Success -Message "Resume scheduled task removed: $script:DeploymentTaskName"
+        # Get-ScheduledTask -TaskName searches every scheduler folder, so piping what it finds
+        # removes both the current '\1S-WIN11\' task and any stale root-folder task registered
+        # by older deployment media.
+        foreach ($task in @(Get-ScheduledTask -TaskName $script:DeploymentTaskName -ErrorAction SilentlyContinue)) {
+            $task | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop
+            Write-Log -Level Success -Message "Resume scheduled task removed: $($task.TaskPath)$($task.TaskName)"
         }
     } catch {
         Write-Log -Level Warn -Message "Unable to remove resume task: $($_.Exception.Message)"
+    }
+
+    try {
+        # Best-effort tidy-up: delete the toolkit's scheduler folder now that its task is gone.
+        # DeleteFolder throws when the folder is missing or still contains tasks; both simply
+        # mean the folder should stay, so the failure is tolerated silently.
+        $scheduler = New-Object -ComObject 'Schedule.Service'
+        $scheduler.Connect()
+        $scheduler.GetFolder('\').DeleteFolder($script:DeploymentTaskFolderName, 0)
+        Write-Log -Level Info -Message "Removed empty scheduler folder $($script:DeploymentTaskPath.TrimEnd('\'))"
+    } catch {
+        Write-Log -Level Debug -Message "Scheduler folder $($script:DeploymentTaskPath.TrimEnd('\')) was not removed (missing or not empty; non-fatal): $($_.Exception.Message)"
+    }
+}
+
+function Get-DeploymentCommonDesktopPath {
+    <#
+        .SYNOPSIS
+            Resolves the all-users (common) desktop folder, or $null when it cannot be
+            resolved (for example on the non-Windows hosts the unit suite runs on).
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $path = [Environment]::GetFolderPath('CommonDesktopDirectory')
+    if ([string]::IsNullOrWhiteSpace($path) -and -not [string]::IsNullOrWhiteSpace($env:PUBLIC)) {
+        $path = Join-Path $env:PUBLIC 'Desktop'
+    }
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+    return $path
+}
+
+function Get-DeploymentDesktopShortcutDefinitions {
+    <#
+        .SYNOPSIS
+            The two technician shortcuts the toolkit maintains on the common desktop, with
+            their powershell.exe argument lines built against the given deployment root.
+
+        .DESCRIPTION
+            'Resume 1S-WIN11 Deployment.lnk' relaunches Resume-Deployment.ps1 elevated via
+            Start-Process -Verb RunAs (a double-clicked .lnk runs unelevated, and the resume
+            path needs administrator rights). '1S-WIN11 Deployment Status.lnk' opens the
+            read-only Get-DeploymentStatus.ps1 view in a window that stays open (-NoExit).
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Object[]])]
+    param([Parameter(Mandatory = $true)][string]$UsbRoot)
+
+    $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
+    $resumeScript = Join-Path $paths.Scripts 'Resume-Deployment.ps1'
+    $statusScript = Join-Path $paths.Scripts 'Get-DeploymentStatus.ps1'
+
+    return @(
+        [ordered]@{
+            file_name   = $script:DeploymentResumeShortcutFileName
+            arguments   = "-NoProfile -Command `"Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$resumeScript'`""
+            description = 'Resumes the 1S-WIN11 Windows 11 deployment from the last completed step (asks for administrator elevation). Created by the 1S-WIN11 deployment toolkit; removed automatically when the deployment completes.'
+        },
+        [ordered]@{
+            file_name   = $script:DeploymentStatusShortcutFileName
+            arguments   = "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$statusScript`""
+            description = 'Shows the current 1S-WIN11 Windows 11 deployment progress without changing anything. Created by the 1S-WIN11 deployment toolkit; removed automatically when the deployment completes.'
+        }
+    )
+}
+
+function Install-DeploymentDesktopShortcuts {
+    <#
+        .SYNOPSIS
+            Creates (or refreshes) the Resume/Status technician shortcuts on the common
+            desktop, pointing at the given deployment root.
+
+        .DESCRIPTION
+            Called at every real run start, and again after a local deployment handover so
+            both shortcuts re-target the local copy (C:\1S-WIN11) instead of the soon-to-be
+            ejected USB. Best-effort: a failure to create a convenience shortcut must never
+            stop a deployment. The Complete step removes both via
+            Remove-DeploymentDesktopShortcuts.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$UsbRoot,
+        [hashtable]$State
+    )
+
+    $desktopPath = Get-DeploymentCommonDesktopPath
+    if (-not $desktopPath) {
+        Write-Log -Level Warn -Message 'Common desktop folder could not be resolved; skipping deployment desktop shortcut creation.'
+        return
+    }
+
+    $paths = Get-DeploymentPaths -UsbRoot $UsbRoot
+    $shortcuts = @(Get-DeploymentDesktopShortcutDefinitions -UsbRoot $UsbRoot)
+
+    if (Test-DeploymentDryRun) {
+        foreach ($shortcut in $shortcuts) {
+            Write-DryRunAction -State $State -Step (Get-DryRunStepName -State $State -Default 'DesktopShortcuts') -Action "would create deployment desktop shortcut '$($shortcut.file_name)' targeting $UsbRoot" -Data ([ordered]@{
+                    path      = (Join-Path $desktopPath $shortcut.file_name)
+                    arguments = $shortcut.arguments
+                })
+        }
+        return
+    }
+
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        foreach ($shortcut in $shortcuts) {
+            $shortcutPath = Join-Path $desktopPath $shortcut.file_name
+            $link = $shell.CreateShortcut($shortcutPath)
+            $link.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $link.Arguments = [string]$shortcut.arguments
+            $link.WorkingDirectory = $paths.Scripts
+            $link.Description = [string]$shortcut.description
+            $link.Save()
+            Write-Log -Level Info -Message "Deployment desktop shortcut created/refreshed: $shortcutPath"
+        }
+    } catch {
+        Write-Log -Level Warn -Message "Could not create deployment desktop shortcuts (non-fatal): $($_.Exception.Message)"
+    }
+}
+
+function Remove-DeploymentDesktopShortcuts {
+    <#
+        .SYNOPSIS
+            Removes the Resume/Status technician shortcuts Install-DeploymentDesktopShortcuts
+            created. Called from the Complete step; in dry-run it records a matching
+            would-remove/not-present preview action per shortcut instead of deleting anything.
+    #>
+    [CmdletBinding()]
+    param(
+        [hashtable]$State,
+        [string]$Step
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Step)) { $Step = Get-DryRunStepName -State $State -Default 'DesktopShortcuts' }
+
+    $desktopPath = Get-DeploymentCommonDesktopPath
+    foreach ($fileName in @($script:DeploymentResumeShortcutFileName, $script:DeploymentStatusShortcutFileName)) {
+        $shortcutPath = if ($desktopPath) { Join-Path $desktopPath $fileName } else { $null }
+        $shortcutExists = [bool]($shortcutPath -and (Test-Path -LiteralPath $shortcutPath -PathType Leaf))
+
+        if (Test-DeploymentDryRun) {
+            if ($shortcutExists) {
+                Write-DryRunAction -State $State -Step $Step -Action "would remove deployment desktop shortcut: $shortcutPath" -Data @{ path = $shortcutPath }
+            } else {
+                Write-DryRunAction -State $State -Step $Step -Action "not present: deployment desktop shortcut $fileName" -Data @{ path = $shortcutPath }
+            }
+            continue
+        }
+
+        if ($shortcutExists) {
+            Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
+            Write-Log -Level Info -Message "Deployment desktop shortcut removed: $shortcutPath"
+        }
     }
 }
 
@@ -1471,7 +1679,7 @@ function Request-DeploymentReboot {
     }
 
     $autoLogonUser = Enable-DeploymentAutoLogon -UsbRoot $UsbRoot
-    Register-DeploymentResumeTask -UsbRoot $UsbRoot -TriggerUsername $autoLogonUser
+    Register-DeploymentResumeTask -UsbRoot $UsbRoot -TriggerUsername $autoLogonUser -TriggerProfile 'PostReboot'
     Write-Log -Level Warn -Message "Reboot required: $Reason"
     Write-Log -Level Info -Message 'The deployment will resume after the next administrator logon.'
     Show-DeploymentToast -Title 'Windows 11 Deployment' -Message "Restarting to continue: $Reason. Will resume automatically after logon."

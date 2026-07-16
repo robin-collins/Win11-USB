@@ -138,7 +138,7 @@ if (-not [string]::IsNullOrWhiteSpace($dattoSiteId)) {
 
 $handoverConfig = if ($config.ContainsKey('local_deployment_handover') -and $null -ne $config.local_deployment_handover) { ConvertTo-PlainHashtable $config.local_deployment_handover } else { @{ enabled = $false } }
 if ([bool]$handoverConfig.enabled) {
-    Add-PreflightResult -Results $results -Name 'Local Deployment Handover' -Status 'Pass' -Message "Deployment files will be copied to $($handoverConfig.local_path) once network is available, so the USB can be ejected early." -Data $null
+    Add-PreflightResult -Results $results -Name 'Local Deployment Handover' -Status 'Pass' -Message "Deployment files are copied to $($handoverConfig.local_path) at the very start of the deployment (no network required), so the USB can be ejected early." -Data $null
 } else {
     Add-PreflightResult -Results $results -Name 'Local Deployment Handover' -Status 'Warn' -Message 'Local deployment handover is disabled; the USB must stay inserted for the entire deployment.' -Data $null
 }

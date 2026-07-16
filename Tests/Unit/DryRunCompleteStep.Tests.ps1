@@ -108,13 +108,15 @@ Describe 'Invoke-DeploymentStep -Step Complete, dry-run scrub preview (T07c)' {
         $completeActions.Count | Should -BeGreaterThan 0 -Because 'the Complete step''s scrub-preview must reach disk, not just the log, so the T08 summary report can aggregate it'
     }
 
-    It 'logs a would-scrub/not-present line for every cached unattend file path, every Winlogon value, the local handover .env, and the WLAN profile' {
+    It 'logs a would-scrub/not-present line for every cached unattend file path, every Winlogon value, the local handover .env, the WLAN profile, and both deployment desktop shortcuts' {
         Invoke-DeploymentStep -Step 'Complete' -UsbRoot $script:StateDir -State $script:State -StatePath $script:StatePath -Config $script:Config
         $reread = Read-DeploymentState -StatePath $script:StatePath
         $completeActions = @($reread.dryrun_actions | Where-Object { $_.step -eq 'Complete' })
 
-        # 5 unattend cache paths + 3 Winlogon values + 1 handover .env + 1 WLAN profile = 10.
-        $completeActions.Count | Should -Be 10
+        # 5 unattend cache paths + 3 Winlogon values + 1 handover .env + 1 WLAN profile
+        # + 2 deployment desktop shortcuts (Remove-DeploymentDesktopShortcuts previews a
+        # would-remove/not-present line per shortcut) = 12.
+        $completeActions.Count | Should -Be 12
         # @(...) wrap required: each dryrun_actions entry is a Hashtable (Read-DeploymentState's
         # ConvertTo-PlainHashtable), and Hashtable has its own .Count (key count). When exactly
         # one item matches, Where-Object unwraps to that single Hashtable rather than a
@@ -122,6 +124,9 @@ Describe 'Invoke-DeploymentStep -Step Complete, dry-run scrub preview (T07c)' {
         # 4 keys (timestamp/step/action/data) instead of "how many actions matched".
         @($completeActions | Where-Object { $_.action -like '*handover*.env*' }).Count | Should -Be 1
         @($completeActions | Where-Object { $_.action -like '*WLAN profile*' }).Count | Should -Be 1
+        # One preview line per shortcut, regardless of whether the shortcut (or even the common
+        # desktop folder, on non-Windows hosts) exists.
+        @($completeActions | Where-Object { $_.action -like '*deployment desktop shortcut*' }).Count | Should -Be 2
     }
 
     It 'does not throw and returns before the real (non-dry-run) scrub/removal branch' {

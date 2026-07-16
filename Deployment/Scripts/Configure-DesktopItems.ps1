@@ -174,6 +174,12 @@ function Sync-DesktopItems {
     $enabledItems = @($DesiredItems | ForEach-Object { ConvertTo-PlainHashtable $_ } | Where-Object { -not ($_.ContainsKey('enabled') -and -not [bool]$_.enabled) })
     $approvedNames = @()
     foreach ($item in $enabledItems) { $approvedNames += (Get-ShortcutFileName -Item $item) }
+    # The toolkit's own Resume/Status shortcuts (Install-DeploymentDesktopShortcuts in
+    # Common.ps1) must survive desktop syncs while the deployment is still in progress -- the
+    # Complete step removes them itself. Always-approved here in code, deliberately not via
+    # user config, so no config edit can strand a half-finished deployment without its resume
+    # entry points.
+    $approvedNames += @($script:DeploymentResumeShortcutFileName, $script:DeploymentStatusShortcutFileName)
 
     $removed = @()
     if ($RemoveUnapproved) {

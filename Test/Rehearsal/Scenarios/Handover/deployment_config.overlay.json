@@ -7,7 +7,6 @@
   "datto_rmm_site_id_uuid": "",
   "local_deployment_handover": {
     "enabled": true,
-    "local_path": "C:\\1S-WIN11",
-    "require_network": true
+    "local_path": "C:\\1S-WIN11"
   }
 }
