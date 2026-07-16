@@ -77,21 +77,21 @@
         Default phase only: passed through to New-VhdBootTestVm.ps1. Default $true.
 
     .EXAMPLE
-        .\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -DisableSecureBoot
+        .\Invoke-VhdVmDeploymentTest.ps1 -DisableSecureBoot
 
         Refreshes Deployment\VHD\1S-WIN11.vhd from the current repo, removes any stale
         '1S-WIN11-VhdBootTest' VM, then creates and starts a fresh one booting from the
         refreshed VHD.
 
     .EXAMPLE
-        .\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -Finalize
+        .\Invoke-VhdVmDeploymentTest.ps1 -Finalize
 
         After watching the deployment run to completion: stops the VM and mounts both its OS
         disk and the 1S-WIN11 media VHD on this host, reporting which deployment/Setup log
         locations exist on each. The disks stay mounted for reading.
 
     .EXAMPLE
-        .\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -Destroy
+        .\Invoke-VhdVmDeploymentTest.ps1 -Destroy
 
         Dismounts both disks, removes the VM and its working folder. The 1S-WIN11 VHD file
         itself is preserved for the next cycle.
@@ -124,8 +124,11 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
-. (Join-Path $PSScriptRoot 'RehearsalCommon.ps1')
+# This script lives at the repo root (beside Initialize-UsbDeployment.ps1, so the test VM is
+# as easy to run as a USB deployment); the rehearsal plumbing it composes stays in Test\Rehearsal.
+$repoRoot = $PSScriptRoot
+$rehearsalRoot = Join-Path $repoRoot 'Test\Rehearsal'
+. (Join-Path $rehearsalRoot 'RehearsalCommon.ps1')
 # Common.ps1 supplies $script:DeploymentVolumeLabel, the same label Get-UsbRoot looks for in
 # production -- so the media-VHD partition search below can never drift from the real one.
 . (Join-Path $repoRoot 'Deployment\Scripts\Common.ps1')
@@ -445,7 +448,7 @@ $updateArgs = @{ VhdPath = $VhdPath }
 if ($SkipValidation) { $updateArgs.SkipValidation = $true }
 # Out-Null is load-bearing: Update-VhdBootMedia.ps1's success stream is polluted by the child
 # scripts it runs (Initialize-UsbDeployment.ps1/Validate-Unattend.ps1), not just its own return.
-& (Join-Path $PSScriptRoot 'Update-VhdBootMedia.ps1') @updateArgs | Out-Null
+& (Join-Path $rehearsalRoot 'Update-VhdBootMedia.ps1') @updateArgs | Out-Null
 
 Write-Host ''
 Write-Host '=== Step 3: Create and start the test VM ===' -ForegroundColor Cyan
@@ -461,12 +464,12 @@ $vmArgs = @{
     Start              = $Start
 }
 if ($DisableSecureBoot) { $vmArgs.DisableSecureBoot = $true }
-$vm = & (Join-Path $PSScriptRoot 'New-VhdBootTestVm.ps1') @vmArgs
+$vm = & (Join-Path $rehearsalRoot 'New-VhdBootTestVm.ps1') @vmArgs
 
 Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Cyan
 Write-Host "  1. Watch the deployment run to completion: vmconnect.exe localhost `"$VmName`""
-Write-Host "  2. Then gather the logs: .\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -Finalize -VmName '$VmName'"
-Write-Host "  3. Then tear down:       .\Test\Rehearsal\Invoke-VhdVmDeploymentTest.ps1 -Destroy -VmName '$VmName'"
+Write-Host "  2. Then gather the logs: .\Invoke-VhdVmDeploymentTest.ps1 -Finalize -VmName '$VmName'"
+Write-Host "  3. Then tear down:       .\Invoke-VhdVmDeploymentTest.ps1 -Destroy -VmName '$VmName'"
 
 return $vm
