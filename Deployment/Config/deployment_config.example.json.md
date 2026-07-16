@@ -174,8 +174,11 @@ The specific commands behind `remove_bloatware` and `start_folders` (package/cap
 | `windows_update_max_cycles` | number | `5` | Maximum Windows Update scan/install/reboot cycles. |
 | `pswindowsupdate_bootstrap` | boolean | `true` | Allows the toolkit to install/import `PSWindowsUpdate` from PowerShell Gallery if missing. |
 | `windows_update_include_microsoft_update` | boolean | `true` | Attempts to include Microsoft Update content, not just Windows Update. |
+| `windows_update_use_local_cache` | boolean | `true` | Before scanning/installing online, applies any `.msu`/`.cab` staged under `Deployment\Updates\` via `wusa.exe`/DISM. Lets a technician pre-download a large rollup once (Microsoft Update Catalog) and reuse it across notebooks instead of re-downloading it on every machine. A package that fails to apply locally is logged and skipped; the online cycle still handles that KB normally. |
 
 If `PSWindowsUpdate` cannot be used, the script falls back to Windows Update COM automation.
+
+Every KB the step attempts — via the local cache or the online scan/install cycle — is written one-per-line to `winupdatesKBs.txt` in the run's report folder (`Deployment\Reports\<device>\`), for a technician to check against Windows Update history at the end of a run.
 
 ## Application Installation
 

@@ -689,4 +689,151 @@ Describe 'Get-DeploymentSteps ordering and handover defaults (resilience contrac
         $config = Get-DefaultDeploymentConfig
         $config.local_deployment_handover.require_network | Should -BeFalse
     }
+
+    It 'defaults windows_update_use_local_cache to true' {
+        $config = Get-DefaultDeploymentConfig
+        $config.windows_update_use_local_cache | Should -BeTrue
+    }
+}
+
+Describe 'ConvertTo-WindowsUpdateKB' {
+    It 'extracts a KB from a staged package filename' {
+        ConvertTo-WindowsUpdateKB -Text 'windows11.0-kb5031354-x64.msu' | Should -Be 'KB5031354'
+    }
+
+    It 'extracts a KB from a Windows Update title' {
+        ConvertTo-WindowsUpdateKB -Text '2024-05 Cumulative Update for Windows 11 (KB5031354)' | Should -Be 'KB5031354'
+    }
+
+    It 'normalises the KB to uppercase regardless of input case' {
+        ConvertTo-WindowsUpdateKB -Text 'kb5031354' | Should -Be 'KB5031354'
+    }
+
+    It 'returns $null when no KB is present in the text' {
+        ConvertTo-WindowsUpdateKB -Text 'Some unrelated update title' | Should -BeNullOrEmpty
+    }
+
+    It 'returns $null for $null or whitespace-only input' {
+        ConvertTo-WindowsUpdateKB -Text $null | Should -BeNullOrEmpty
+        ConvertTo-WindowsUpdateKB -Text '   ' | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-WindowsUpdateCycleKBs' {
+    It 'reads the KB property from PSWindowsUpdate-shaped update objects' {
+        $updates = @(
+            [pscustomobject]@{ Title = 'Cumulative Update'; KB = 'KB5031354'; Size = '1.2 GB' }
+            [pscustomobject]@{ Title = 'Defender Definition Update'; KB = 'KB2267602'; Size = '80 MB' }
+        )
+        $result = Get-WindowsUpdateCycleKBs -Updates $updates
+        $result | Should -Contain 'KB5031354'
+        $result | Should -Contain 'KB2267602'
+        $result.Count | Should -Be 2
+    }
+
+    It 'falls back to extracting the KB from the title when the KB property is empty' {
+        $updates = @([pscustomobject]@{ Title = '2024-05 Cumulative Update for Windows 11 (KB5031354)'; KB = $null })
+        Get-WindowsUpdateCycleKBs -Updates $updates | Should -Be @('KB5031354')
+    }
+
+    It 'reads the title key from COM-fallback-shaped ordered hashtables' {
+        $updates = @([ordered]@{ title = '2024-05 Cumulative Update for Windows 11 (KB5031354)' })
+        Get-WindowsUpdateCycleKBs -Updates $updates | Should -Be @('KB5031354')
+    }
+
+    It 'skips entries with no KB anywhere and returns an empty array for no updates' {
+        $updates = @([pscustomobject]@{ Title = 'Untitled miscellaneous update'; KB = $null })
+        @(Get-WindowsUpdateCycleKBs -Updates $updates).Count | Should -Be 0
+        @(Get-WindowsUpdateCycleKBs -Updates @()).Count | Should -Be 0
+    }
+}
+
+Describe 'Add-HandledWindowsUpdateKB' {
+    It 'initialises windows_update_kbs on a state hashtable with no existing key' {
+        $state = @{}
+        Add-HandledWindowsUpdateKB -State $state -KB @('KB5031354')
+        $state.windows_update_kbs | Should -Be @('KB5031354')
+    }
+
+    It 'merges and deduplicates KBs across repeated calls, sorted' {
+        $state = @{ windows_update_kbs = @('KB5031354') }
+        Add-HandledWindowsUpdateKB -State $state -KB @('KB2267602', 'KB5031354')
+        @($state.windows_update_kbs) | Should -Be @('KB2267602', 'KB5031354')
+    }
+
+    It 'ignores $null/empty entries in the incoming KB list' {
+        $state = @{ windows_update_kbs = @('KB5031354') }
+        Add-HandledWindowsUpdateKB -State $state -KB @($null, '')
+        @($state.windows_update_kbs) | Should -Be @('KB5031354')
+    }
+}
+
+Describe 'Get-StagedWindowsUpdatePackages' {
+    BeforeEach {
+        $script:UpdatesDir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:UpdatesDir -Force | Out-Null
+    }
+
+    It 'returns .msu and .cab files but not unrelated files' {
+        Set-Content -LiteralPath (Join-Path $script:UpdatesDir 'windows11.0-kb5031354-x64.msu') -Value 'x'
+        Set-Content -LiteralPath (Join-Path $script:UpdatesDir 'update.cab') -Value 'x'
+        Set-Content -LiteralPath (Join-Path $script:UpdatesDir 'readme.txt') -Value 'x'
+
+        $result = @(Get-StagedWindowsUpdatePackages -Folder $script:UpdatesDir)
+        $result.Count | Should -Be 2
+        @($result.Name) | Should -Contain 'windows11.0-kb5031354-x64.msu'
+        @($result.Name) | Should -Contain 'update.cab'
+    }
+
+    It 'recurses into subfolders (e.g. staged by patch month)' {
+        $subfolder = Join-Path $script:UpdatesDir '2024-05'
+        New-Item -ItemType Directory -Path $subfolder -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $subfolder 'kb5031354.msu') -Value 'x'
+
+        @(Get-StagedWindowsUpdatePackages -Folder $script:UpdatesDir).Count | Should -Be 1
+    }
+
+    It 'returns an empty array for a folder that does not exist' {
+        @(Get-StagedWindowsUpdatePackages -Folder (Join-Path $script:UpdatesDir 'missing')).Count | Should -Be 0
+    }
+}
+
+Describe 'Write-HandledWindowsUpdateKBsReport' {
+    BeforeEach {
+        # Same rationale as the deployment state round-trip suite above: Get-DeploymentReportRoot
+        # calls the Windows-only Get-DeviceIdentity internally, so it is mocked here to isolate
+        # the pure file-write behaviour under test.
+        Mock Get-DeviceIdentity {
+            @{
+                serial_number   = 'TEST-SERIAL-002'
+                uuid            = '22222222-2222-2222-2222-222222222222'
+                computer_name   = 'TESTPC2'
+                manufacturer    = 'Dell'
+                model           = 'Latitude'
+                windows_caption = 'Windows 11 Pro'
+                windows_version = '10.0.22621'
+                windows_build   = '22621'
+            }
+        }
+
+        $script:UsbRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:UsbRoot -Force | Out-Null
+    }
+
+    It 'writes one KB per line to winupdatesKBs.txt under the report root' {
+        $state = @{ windows_update_kbs = @('KB2267602', 'KB5031354') }
+        $outPath = Write-HandledWindowsUpdateKBsReport -UsbRoot $script:UsbRoot -State $state
+
+        Split-Path -Leaf $outPath | Should -Be 'winupdatesKBs.txt'
+        Test-Path -LiteralPath $outPath -PathType Leaf | Should -BeTrue
+        @(Get-Content -LiteralPath $outPath) | Should -Be @('KB2267602', 'KB5031354')
+    }
+
+    It 'writes an empty file when no KBs have been handled yet' {
+        $state = @{}
+        $outPath = Write-HandledWindowsUpdateKBsReport -UsbRoot $script:UsbRoot -State $state
+
+        Test-Path -LiteralPath $outPath -PathType Leaf | Should -BeTrue
+        @(Get-Content -LiteralPath $outPath) | Should -BeNullOrEmpty
+    }
 }

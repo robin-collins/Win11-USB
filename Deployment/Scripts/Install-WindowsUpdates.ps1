@@ -145,6 +145,36 @@ function Invoke-ComWindowsUpdateScan {
     }
 }
 
+function Install-StagedWindowsUpdatePackage {
+    <#
+        Applies one locally staged .msu/.cab (see Get-StagedWindowsUpdatePackages, Common.ps1)
+        directly via wusa/DISM, ahead of the online scan/install cycle below. This is the whole
+        point of the local cache: a KB already applied this way shows up as installed the moment
+        Get-WindowsUpdate/the COM searcher looks, so the online cycle never re-downloads it.
+        Invoke-ExternalCommand is dry-run-aware on its own (logs "would run" and returns a
+        synthetic success without executing), so this needs no separate dry-run branch here.
+        Best-effort: a failed local-cache apply is logged and swallowed rather than failing the
+        step, since the normal online cycle below is always the fallback for that KB.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileInfo]$Package,
+        [Parameter(Mandatory = $true)][hashtable]$State
+    )
+
+    $kb = ConvertTo-WindowsUpdateKB -Text $Package.Name
+    try {
+        if ($Package.Extension -ieq '.msu') {
+            $result = Invoke-ExternalCommand -FilePath 'wusa.exe' -Arguments @($Package.FullName, '/quiet', '/norestart') -AllowedExitCodes @(0, 3010, 2359302) -LogName "wusa-$($Package.BaseName).log" -State $State
+        } else {
+            $result = Invoke-ExternalCommand -FilePath 'Dism.exe' -Arguments @('/Online', '/Add-Package', "/PackagePath:$($Package.FullName)", '/NoRestart', '/Quiet') -AllowedExitCodes @(0, 3010) -LogName "dism-$($Package.BaseName).log" -State $State
+        }
+        Write-Log -Level Success -Message "Applied locally staged Windows Update package $($Package.Name) (exit code $($result.exit_code))."
+    } catch {
+        Write-Log -Level Warn -Message "Locally staged Windows Update package $($Package.Name) could not be applied; the online scan/install cycle will handle it instead: $($_.Exception.Message)"
+    }
+    return $kb
+}
+
 function Invoke-ComWindowsUpdateCycle {
     $session = New-Object -ComObject Microsoft.Update.Session
     $searcher = $session.CreateUpdateSearcher()
@@ -189,6 +219,23 @@ $maxCycles = [int]$config.windows_update_max_cycles
 if ($maxCycles -lt 1) { $maxCycles = 1 }
 $includeMicrosoftUpdate = [bool]$config.windows_update_include_microsoft_update
 
+if ([bool]$config.windows_update_use_local_cache) {
+    # Runs ahead of both the dry-run and real branches below, and unconditionally in both: a
+    # locally staged package is applied via wusa/DISM rather than downloaded, and
+    # Invoke-ExternalCommand's own dry-run awareness (see Install-StagedWindowsUpdatePackage)
+    # already makes this a safe no-op log entry during a dry run.
+    $stagedPackages = @(Get-StagedWindowsUpdatePackages -Folder $paths.Updates)
+    if ($stagedPackages.Count -gt 0) {
+        Write-Log -Level Info -Message "Found $($stagedPackages.Count) locally staged Windows Update package(s) in $($paths.Updates); applying before the online scan/install cycle."
+        foreach ($package in $stagedPackages) {
+            $kb = Install-StagedWindowsUpdatePackage -Package $package -State $state
+            if ($kb) { Add-HandledWindowsUpdateKB -State $state -KB $kb }
+        }
+        Write-DeploymentState -State $state -StatePath $StatePath
+        Write-HandledWindowsUpdateKBsReport -UsbRoot $UsbRoot -State $state | Out-Null
+    }
+}
+
 if (Test-DeploymentDryRun) {
     # Dry-run invariant (FABLE_TASKS.md T07b): a single real scan is the whole value of this
     # step in dry-run -- it is never repeated across windows_update_max_cycles, since nothing
@@ -197,6 +244,7 @@ if (Test-DeploymentDryRun) {
     if (-not (Test-InternetConnectivity)) {
         Write-DryRunAction -State $state -Step 'WindowsUpdates' -Action 'skipped: no internet connectivity detected' -Data @{ include_microsoft_update = $includeMicrosoftUpdate }
         Write-Log -Level Info -Message 'Dry run: no internet connectivity detected; skipping the Windows Update scan.'
+        Write-HandledWindowsUpdateKBsReport -UsbRoot $UsbRoot -State $state | Out-Null
         return
     }
 
@@ -216,6 +264,8 @@ if (Test-DeploymentDryRun) {
 
     Write-DryRunAction -State $state -Step 'WindowsUpdates' -Action "scan (method=$scanMethod) found $($cycleResult.updates.Count) update(s); would-reboot=$($cycleResult.reboot_required)" -Data $cycleResult
     Write-Log -Level Success -Message "Dry run: Windows Update scan found $($cycleResult.updates.Count) update(s) (nothing installed). Would reboot afterward: $($cycleResult.reboot_required)."
+    Add-HandledWindowsUpdateKB -State $state -KB (Get-WindowsUpdateCycleKBs -Updates $cycleResult.updates)
+    Write-HandledWindowsUpdateKBsReport -UsbRoot $UsbRoot -State $state | Out-Null
     return
 }
 
@@ -238,8 +288,10 @@ for ($cycle = ([int]$state.update_cycle + 1); $cycle -le $maxCycles; $cycle++) {
         $cycleResult = Invoke-ComWindowsUpdateCycle
     }
 
+    Add-HandledWindowsUpdateKB -State $state -KB (Get-WindowsUpdateCycleKBs -Updates $cycleResult.updates)
     Add-StateHistory -State $state -Event 'windows_update_cycle_completed' -Data @{ cycle = $cycle; result = $cycleResult }
     Write-DeploymentState -State $state -StatePath $StatePath
+    Write-HandledWindowsUpdateKBsReport -UsbRoot $UsbRoot -State $state | Out-Null
     Write-StructuredLog -Level Info -Message "Windows Update cycle $cycle completed" -Data $cycleResult
     Write-Log -Level Info -Message "Windows Update cycle $cycle of $maxCycles completed: $($cycleResult.installed_count) update(s) installed; reboot required: $($cycleResult.reboot_required)."
 

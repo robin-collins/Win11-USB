@@ -28,6 +28,11 @@ Deployment/Apps/Local/*
 Deployment/Apps/Winget/*
 !Deployment/Apps/Winget/.gitkeep
 
+# Locally staged Windows Update packages (.msu/.cab) fetched once from the Microsoft Update
+# Catalog and reused across notebooks instead of re-downloading a large rollup on every machine.
+Deployment/Updates/*
+!Deployment/Updates/.gitkeep
+
 # WiFi profiles exported via `netsh wlan export profile key=clear` contain real, plaintext
 # network passwords -- never committed, same treatment as .env.
 Deployment/WifiProfiles/*

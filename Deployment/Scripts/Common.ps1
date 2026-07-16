@@ -205,6 +205,7 @@ function Get-DeploymentPaths {
         Drivers     = Join-Path $root 'Deployment\Drivers'
         NetworkDrivers = Join-Path $root 'Deployment\Drivers\Network'
         WifiProfiles = Join-Path $root 'Deployment\WifiProfiles'
+        Updates     = Join-Path $root 'Deployment\Updates'
         Tools       = Join-Path $root 'Deployment\Tools'
         StateFile   = Join-Path $root ('Deployment\State\' + $stateFileName)
         ConfigFile  = Join-Path $root 'Deployment\Config\deployment_config.json'
@@ -251,7 +252,7 @@ function Initialize-DeploymentDirectories {
             $paths.NetworkDrivers, (Join-Path $paths.NetworkDrivers 'Intel'),
             (Join-Path $paths.NetworkDrivers 'Realtek'), (Join-Path $paths.NetworkDrivers 'Qualcomm'),
             (Join-Path $paths.NetworkDrivers 'Broadcom'), (Join-Path $paths.NetworkDrivers 'Generic'),
-            $paths.WifiProfiles, $paths.Tools
+            $paths.WifiProfiles, $paths.Updates, $paths.Tools
         )) {
         if (-not (Test-Path -LiteralPath $path -PathType Container)) {
             New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null
@@ -288,6 +289,95 @@ function Install-InfDriversFromFolder {
     Write-Log -Level Success -Message "Processed $($infFiles.Count) driver INF file(s) from $Folder."
     Write-StructuredLog -Level Info -Message 'Driver installation result' -Data $summary
     return $summary
+}
+
+function ConvertTo-WindowsUpdateKB {
+    <#
+        Pulls a normalised "KBxxxxxxx" out of arbitrary text -- a staged package filename
+        (windows11.0-kb5031354-x64.msu) or a Windows Update title
+        ("2024-05 Cumulative Update for Windows 11 (KB5031354)") -- so both the local-cache
+        install path and the PSWindowsUpdate/COM scan paths feed the same KB checklist.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $match = [regex]::Match($Text, 'KB\d{6,7}', 'IgnoreCase')
+    if (-not $match.Success) { return $null }
+    return $match.Value.ToUpperInvariant()
+}
+
+function Get-WindowsUpdateCycleKBs {
+    <#
+        Extracts KBs from a windows-update cycle/scan result's `updates` collection, which is
+        shaped differently depending on which code path produced it: PSWindowsUpdate results are
+        objects with a KB property (Invoke-PSWindowsUpdateCycle/-Scan's
+        `Select-Object Title, KB, Size, Result`); the COM fallback only has a `title` string
+        inside an ordered hashtable (Invoke-ComWindowsUpdateCycle/-Scan). Falling back to
+        ConvertTo-WindowsUpdateKB on the title covers both shapes, and the COM path having no
+        native KB field, with one function.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Object[]])]
+    param([object[]]$Updates)
+
+    $kbs = @()
+    foreach ($item in @($Updates)) {
+        if ($null -eq $item) { continue }
+        $text = $null
+        if ($item -is [System.Collections.IDictionary]) {
+            if ($item.Contains('KB') -and $item['KB']) { $text = [string]$item['KB'] }
+            elseif ($item.Contains('title') -and $item['title']) { $text = [string]$item['title'] }
+        } else {
+            $kbProperty = $item.PSObject.Properties['KB']
+            if ($kbProperty -and $kbProperty.Value) { $text = [string]$kbProperty.Value }
+            if (-not $text) {
+                $titleProperty = $item.PSObject.Properties['Title']
+                if ($titleProperty -and $titleProperty.Value) { $text = [string]$titleProperty.Value }
+            }
+        }
+        $kb = ConvertTo-WindowsUpdateKB -Text $text
+        if ($kb) { $kbs += $kb }
+    }
+    return @($kbs)
+}
+
+function Add-HandledWindowsUpdateKB {
+    <#
+        Merges newly seen KB(s) into $State.windows_update_kbs (deduplicated, sorted), the same
+        loose-schema-evolution pattern already used for $State.dryrun_reboots -- so the running
+        list survives across this step's multiple scan/install cycles and across a mid-run
+        reboot/resume, since it lives in the persisted deployment state rather than a local
+        variable.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$State,
+        [string[]]$KB
+    )
+
+    $existing = @()
+    if ($State.ContainsKey('windows_update_kbs') -and $null -ne $State.windows_update_kbs) {
+        $existing = @($State.windows_update_kbs)
+    }
+    $incoming = @($KB) | Where-Object { $_ }
+    $State.windows_update_kbs = @(@($existing + $incoming) | Select-Object -Unique | Sort-Object)
+}
+
+function Get-StagedWindowsUpdatePackages {
+    <#
+        Enumerates .msu/.cab files staged under Deployment\Updates for reuse across notebooks
+        instead of re-downloading a large rollup from Windows Update on every machine (see
+        Install-StagedWindowsUpdatePackage in Install-WindowsUpdates.ps1).
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Object[]])]
+    param([Parameter(Mandatory = $true)][string]$Folder)
+
+    if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Folder -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.msu', '.cab' })
 }
 
 function Read-JsonFile {
@@ -411,6 +501,7 @@ function Get-DefaultDeploymentConfig {
         allow_continue_without_ac        = $false
         allow_continue_with_pending_reboot = $false
         pswindowsupdate_bootstrap        = $true
+        windows_update_use_local_cache   = $true
         winget_bootstrap                 = $false
         windows_update_include_microsoft_update = $true
         local_admin_description          = 'Local administrator created by 1S Windows 11 deployment toolkit'
@@ -1962,6 +2053,31 @@ function Get-DeploymentReportRoot {
     $reportRoot = if (Test-DeploymentDryRun) { Join-Path (Join-Path $paths.Reports $safeDevice) 'dryrun' } else { Join-Path $paths.Reports $safeDevice }
     New-Item -ItemType Directory -Path $reportRoot -Force -ErrorAction Stop | Out-Null
     return $reportRoot
+}
+
+function Write-HandledWindowsUpdateKBsReport {
+    <#
+        Flat, human-checkable KB list (winupdatesKBs.txt) alongside the other per-device
+        reports: every KB the WindowsUpdates step has attempted, whether via a locally staged
+        package (Add-HandledWindowsUpdateKB from Install-WindowsUpdates.ps1's cache step) or a
+        PSWindowsUpdate/COM scan-install cycle, so a technician has a plain checklist to compare
+        against Windows Update history at the end of a run.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][string]$UsbRoot,
+        [Parameter(Mandatory = $true)][hashtable]$State
+    )
+
+    $kbs = @()
+    if ($State.ContainsKey('windows_update_kbs') -and $null -ne $State.windows_update_kbs) {
+        $kbs = @($State.windows_update_kbs)
+    }
+    $reportRoot = Get-DeploymentReportRoot -UsbRoot $UsbRoot
+    $outPath = Join-Path $reportRoot 'winupdatesKBs.txt'
+    Set-Content -LiteralPath $outPath -Value $kbs -Encoding UTF8 -Force
+    return $outPath
 }
 
 function Write-DryRunSummaryReport {

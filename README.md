@@ -301,6 +301,8 @@ Every step is logged to `OSIT-DiskCheck.log` at the USB root: which drivers were
 
 Drop boot-critical storage/RAID/NVMe driver packages (`.inf` plus their `.sys`/`.cat`/`.dll` files) under `Deployment\Drivers\Storage\<Vendor>` — this is a separate, WinPE-time convention from the post-install `Deployment\Drivers\<Manufacturer>\<Model>` and `Deployment\Drivers\Network\<Vendor>` folders documented below, because `drvload` runs before Windows itself is even installed. Default vendor folders created on the USB: `Deployment\Drivers\Storage\Intel`, `Deployment\Drivers\Storage\AMD`, `Deployment\Drivers\Storage\Generic`. An empty or missing folder is skipped, same as the Network vendor folders.
 
+`IntegrateDriversToWindowsInstall.ps1` accepts a drive letter/folder (`-UsbRoot`), or one or more `.vhd`/`.vhdx` files (`-VhdPath`, wildcards supported) that it mounts, services, and dismounts in turn — so the same driver set can be patched into every golden VHD you keep, not just a physically inserted USB. One bad VHD in a `-VhdPath` batch is logged and skipped rather than aborting the rest; the script exits with an error afterward if any target failed. See `Get-Help .\IntegrateDriversToWindowsInstall.ps1 -Full` for every parameter.
+
 Validate the repository template:
 
 ```powershell
@@ -437,6 +439,16 @@ This is disabled by default. Enable it once you are ready to have technicians ej
 
 Treat everything in `Deployment\WifiProfiles\` as a secret: `key=clear` means these files contain real, plaintext network passwords. The folder's contents are gitignored the same way `.env` is — only `.gitkeep` is committed.
 
+## Windows Update Local Cache
+
+`Deployment\Updates\` holds `.msu`/`.cab` packages downloaded once (e.g. from the Microsoft Update Catalog) and reused across notebooks, so a large cumulative/security rollup does not get re-downloaded through Windows Update on every machine. Drop a package in the folder (subfolders are fine, e.g. by patch month) and the `WindowsUpdates` step applies it directly via `wusa.exe` (`.msu`) or DISM (`.cab`) before the normal PSWindowsUpdate/COM scan-install cycle runs.
+
+- A KB already applied this way is simply already installed by the time the online scan looks, so the cycle does not re-download it.
+- Applying a staged package is best-effort: a package that fails to apply (wrong architecture/edition, already superseded, etc.) is logged and skipped — the online cycle still handles that KB the normal way.
+- Controlled by `windows_update_use_local_cache` (default `true`); see `Deployment\Config\deployment_config.example.json.md`.
+- The folder is gitignored the same way `Deployment\Drivers\` and `Deployment\WifiProfiles\` are — only `.gitkeep` is committed, since these packages are large and not something to check into git.
+- Every KB the step attempts, from the local cache or the online cycle, is written to `winupdatesKBs.txt` in that run's report folder — a plain checklist to compare against Windows Update history afterward.
+
 ## SMTP Email Notifications
 
 `Deployment\Config\smtp_config.json` (documented in `Deployment\Config\smtp_config.example.json.md`) controls emailing the deployment report, Markdown summary, asset inventory, and a zip of the run's logs to a distribution list. It is disabled by default.
@@ -477,6 +489,7 @@ Each run writes:
 - JSON deployment report.
 - Markdown deployment summary.
 - JSON asset inventory.
+- `winupdatesKBs.txt` — every KB the `WindowsUpdates` step has handled so far (local cache or online), one per line. See "Windows Update Local Cache" below.
 
 All of the above are relative to the deployment root. If `local_deployment_handover` moves the deployment to `C:\1S-WIN11` (or your configured `local_path`), state, logs, and reports from that point on live under `C:\1S-WIN11\Deployment\...` instead of the USB, carried forward from whatever the USB already had at handover time.
 
