@@ -66,6 +66,7 @@ Test/Rehearsal/VhdBootVms/
 *.vhd
 *.vhdx
 *.avhd
+*.wim
 
 # External/unattend-generator is a git submodule (C# source only); its .NET build/publish
 # output is a local, reproducible artifact (see Build-UnattendGeneratorLibrary.ps1), not
